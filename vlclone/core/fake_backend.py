@@ -308,13 +308,24 @@ class FakeProbe:
                 meta.duration_ms = 180_000
         return meta
 
-    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1,
+                  at_ms: int | None = None) -> bool:
         from .png import write_png
 
-        self.thumbnailed.append(path)
+        self.thumbnailed.append(path if at_ms is None else (path, at_ms))
         if path in self.fail_thumbnails:
             return False
-        write_png(out_path, 4, 2, bytes([200, 80, 20]) * 8)
+        if at_ms is None:
+            write_png(out_path, 4, 2, bytes([200, 80, 20]) * 8)
+            return True
+        # Seek previews: a 16:9 gradient whose hue follows the time, so frames differ.
+        w, h = max(16, width) // 2 * 2, max(16, width) * 9 // 16 // 2 * 2
+        t = (at_ms // 1000) % 256
+        rows = bytearray()
+        for y in range(h):
+            for x in range(w):
+                rows += bytes(((t + x) % 256, (40 + y * 2) % 256, (200 - t) % 256))
+        write_png(out_path, w, h, bytes(rows))
         return True
 
     def close(self) -> None:

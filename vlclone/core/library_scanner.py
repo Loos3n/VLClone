@@ -33,7 +33,9 @@ class MetadataProbe(ABC):
     @abstractmethod
     def probe(self, path: str) -> MediaMeta: ...
 
-    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1,
+                  at_ms: int | None = None) -> bool:
+        """Write a PNG of one frame: at ``at_ms`` (seek previews) or a third of the way in."""
         return False
 
     def close(self) -> None:
