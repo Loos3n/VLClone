@@ -218,10 +218,11 @@ def test_library_scan_with_real_probe(tmp_path):
     write_y4m(str(videos / "Bars.y4m"))
     write_chapter_mkv(str(music / "Tone.mka"), seconds=3, title="Tone Title")
     try:
-        svc = LibraryService(LibraryDB(tmp_path / "lib.db"), vlc_backend.VlcMediaProbe,
-                             thumbs_dir=tmp_path / "thumbs", watch=False)
+        vlc_backend.VlcMediaProbe().close()  # the service creates its probe on the worker thread
     except vlc_backend.LibVlcNotFound as exc:
         pytest.skip(str(exc))
+    svc = LibraryService(LibraryDB(tmp_path / "lib.db"), vlc_backend.VlcMediaProbe,
+                         thumbs_dir=tmp_path / "thumbs", watch=False)
     svc.add_folder(str(videos), "video")
     svc.add_folder(str(music), "music")
     assert svc.wait(60)

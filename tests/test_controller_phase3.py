@@ -6,7 +6,13 @@ from vlclone.core.backend import Chapter, PlaybackState, TitleInfo
 from vlclone.core.controller import PlayerController
 from vlclone.core.effects import Effects, EffectsStore
 from vlclone.core.fake_backend import FakeBackend
+from vlclone.core.media_sources import path_to_mrl
 from vlclone.core.settings import Settings
+
+
+def local(path: str) -> str:
+    """The MRL PlayerController.open makes for a local path (on Windows it gains a drive letter)."""
+    return path_to_mrl(path)
 
 
 class Clock:
@@ -148,10 +154,10 @@ def test_resume_entries_include_the_playing_file(tmp_path):
 
     ctl = PlayerController(FakeBackend(), Settings(), ResumeStore(tmp_path / "r.json", 1000))
     assert PlayerController(FakeBackend(), Settings()).resume_entries() == {}
-    start(ctl, "file:///film.mkv")
+    start(ctl, local("/film.mkv"))
     ctl.backend.advance(20_000)
     entries = ctl.resume_entries()
-    assert entries["file:///film.mkv"][0] == 20_000
+    assert entries[local("/film.mkv")][0] == 20_000
 
 
 def test_failed_stream_reports_a_clear_error(ctl):
@@ -178,8 +184,8 @@ def test_stream_that_ends_without_playing_is_an_error(ctl):
 def test_local_file_end_is_not_an_error(ctl):
     failed = []
     ctl.open_failed.connect(lambda item, msg: failed.append(msg))
-    ctl.backend.dead_mrls.add("file:///tiny.wav")
-    start(ctl, "file:///tiny.wav")
+    ctl.backend.dead_mrls.add(local("/tiny.wav"))
+    start(ctl, local("/tiny.wav"))
     assert not failed and ctl.state is PlaybackState.STOPPED
 
 
@@ -208,8 +214,8 @@ def test_hanging_stream_times_out(ctl, clock):
 
 
 def test_local_files_never_time_out(ctl, clock):
-    ctl.backend.hang_mrls.add("file:///slow/disk.mkv")
-    start(ctl, "file:///slow/disk.mkv")
+    ctl.backend.hang_mrls.add(local("/slow/disk.mkv"))
+    start(ctl, local("/slow/disk.mkv"))
     clock.t += 1000
     ctl.tick()
     assert ctl.state is PlaybackState.OPENING
@@ -226,7 +232,7 @@ def test_item_options_and_default_caching(ctl):
     assert b.options == [":network-caching=5000"]
     start(ctl, "http://x/c.mp4", options=[":network-caching=200"])
     assert b.options == [":network-caching=200"]  # explicit value wins
-    start(ctl, "file:///local.mkv")
+    start(ctl, local("/local.mkv"))
     assert b.options == []
 
 
@@ -234,7 +240,7 @@ def test_item_options_and_default_caching(ctl):
 def test_geometry_persists_globally(tmp_path):
     settings = Settings()
     ctl = PlayerController(FakeBackend(), settings)
-    start(ctl, "file:///a.mkv")
+    start(ctl, local("/a.mkv"))
     ctl.set_aspect_ratio("16:9")
     ctl.set_crop("4:3")
     ctl.set_zoom(2.0)
@@ -247,7 +253,7 @@ def test_geometry_persists_globally(tmp_path):
     again = PlayerController(FakeBackend(), Settings.load(path))
     v = again.video
     assert (v.aspect_ratio, v.crop, v.zoom, v.rotation, v.deinterlace) == ("16:9", "4:3", 2.0, 90, "yadif")
-    start(again, "file:///b.mkv")
+    start(again, local("/b.mkv"))
     b = again.backend
     assert (b.aspect_ratio, b.crop, b.zoom, b.deinterlace, b.rotation) == ("16:9", "4:3", 2.0, "yadif", 90)
 
@@ -257,7 +263,7 @@ def test_geometry_per_file(tmp_path):
     ctl = PlayerController(FakeBackend(), Settings(effects_scope="per_file"), effects_store=store)
     seen = []
     ctl.video_changed.connect(lambda v: seen.append(v.aspect_ratio))
-    ctl.open(["file:///a.mkv", "file:///b.mkv"])
+    ctl.open([local("/a.mkv"), local("/b.mkv")])
     ctl.tick()
     ctl.set_aspect_ratio("4:3")
     ctl.set_rotation(180)
@@ -273,12 +279,12 @@ def test_geometry_per_file(tmp_path):
     assert seen[-1] == "4:3"
     ctl.shutdown()
     reloaded = EffectsStore(tmp_path / "fx.json")
-    assert reloaded.get("file:///a.mkv").geometry.aspect_ratio == "4:3"
-    assert reloaded.get("file:///b.mkv").geometry.zoom == 0.5
+    assert reloaded.get(local("/a.mkv")).geometry.aspect_ratio == "4:3"
+    assert reloaded.get(local("/b.mkv")).geometry.zoom == 0.5
 
 
 def test_reset_all_effects_keeps_geometry_and_reset_video_clears_it(ctl):
-    start(ctl, "file:///a.mkv")
+    start(ctl, local("/a.mkv"))
     ctl.set_crop("16:9")
     ctl.set_flip(horizontal=True)
     ctl.reset_all_effects()
