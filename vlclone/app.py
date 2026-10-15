@@ -17,19 +17,67 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _write_test_tone(path: str, seconds: float = 3.0) -> None:
+    import math
+    import struct as _struct
+    import wave
+
+    rate = 22050
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        frames = bytearray()
+        for n in range(int(rate * seconds)):
+            sample = int(12000 * math.sin(2 * math.pi * 440 * n / rate))
+            frames += _struct.pack("<hh", sample, sample)
+        wav.writeframes(bytes(frames))
+
+
 def self_test(report: str) -> int:
-    """Headless check that the packaged app can load libVLC and its plugins."""
+    """Headless check that the packaged app can load libVLC, play, and apply effects.
+
+    Exit code is non-zero only if libVLC itself is unusable; effect results are
+    written to the report so a build log shows them.
+    """
+    import tempfile
+    import time
+
+    lines: list[str] = []
+    code = 0
     try:
+        from .core.backend import PlaybackState
+        from .core.effects import EngineFilters
+        from .core.media_sources import path_to_mrl
         from .core.vlc_backend import VlcBackend
 
         backend = VlcBackend(["--quiet", "--vout=dummy", "--aout=dummy"])
-        version = backend.engine_version()
+        lines.append(f"ok libVLC {backend.engine_version()}")
+        lines.append(f"equalizer presets: {len(backend.equalizer_presets())}")
+        lines.append(f"normalization supported: {backend.supports_normalization}")
+        with tempfile.TemporaryDirectory() as tmp:
+            tone = os.path.join(tmp, "tone.wav")
+            _write_test_tone(tone)
+            backend.set_engine_filters(EngineFilters("hflip", 0.5))
+            backend.load(path_to_mrl(tone))
+            backend.play()
+            deadline = time.monotonic() + 8
+            while backend.state() is not PlaybackState.PLAYING and time.monotonic() < deadline:
+                time.sleep(0.05)
+            lines.append(f"playback (filtered instance): {backend.state().value}")
+            backend.set_equalizer(5.0, [2.0] * 10)
+            backend.set_stereo_mode(7)
+            lines.append(f"stereo mode set: {backend.vlc.libvlc_audio_get_channel(backend.player)}")
+            if backend.supports_normalization:
+                ok = backend._aout_hook.set_chain(backend.player, "equalizer:normvol", 2.0)
+                lines.append(f"normalization hook applied: {ok}")
+            backend.stop()
         backend.release()
-        text, code = f"ok libVLC {version}\n", 0
     except Exception as exc:  # report anything: this runs without a console
-        text, code = f"fail {type(exc).__name__}: {exc}\n", 1
+        lines.append(f"fail {type(exc).__name__}: {exc}")
+        code = 1
     with open(report, "w", encoding="utf-8") as fh:
-        fh.write(text)
+        fh.write("\n".join(lines) + "\n")
     return code
 
 

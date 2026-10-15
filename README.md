@@ -108,13 +108,38 @@ manager is needed for the translucent controls (every modern desktop has one).
   *Video* (aspect ratio, crop, zoom, rotate, deinterlace, snapshot) pages. The
   same options are in the `⋯` menu / right-click menu. Dropping a subtitle file
   on a playing video loads it.
+* **Effects & filters** (`Ctrl+Shift+E`, or *Effects…* in Quick settings →
+  Audio/Video): a floating panel with
+  * *Equalizer*: 10 bands (31 Hz–16 kHz) plus preamp, on/off, all 18 VLC
+    presets (Flat, Classical, Club, Dance, Full bass, …, Rock, Pop, Techno),
+    and your own presets (*Save…*, *Delete*). Double-click a slider to zero it.
+  * *Audio*: volume normalization with its maximum level, stereo mode
+    (stereo, mono, left, right, reverse) and the same audio delay control as
+    Quick settings. Gain above 100 % stays on the main volume slider.
+  * *Image*: brightness, contrast, hue, saturation, gamma, each with its own
+    reset.
+  * *Reset all* puts every effect back to neutral.
+
+  Everything in the panel is **live**. Flip and sharpen sit next to rotate,
+  crop, zoom and deinterlace in Quick settings → Video and are marked
+  **↻ reloads**: libVLC applies them when media loads, so VLClone reloads the
+  file at the same position (keeping pause state, tracks, subtitles, delays,
+  A-B points). Several changes in a row are batched into one reload about
+  0.6 s after the last one.
+* **Effect settings persist**, either one set for every file (default) or per
+  file (Settings → Audio & video → *Effect settings apply to*). Per-file mode:
+  each file remembers its own effects; new files start from the global set.
 * **Resume**: files continue where you stopped (with a *Start over* button).
+* **Playlist restore**: the playlist comes back on the next launch with the
+  last item selected (Settings → Playback; turn off to start empty).
 * **Media information** (`Ctrl+I`) shows metadata, codecs, resolution, frame
   rate, audio format and live bitrate/frame statistics.
 * **Settings** (`Ctrl+P`) is one short page: playback, audio & video, interface,
   shortcut editor.
 
 ![Quick settings](docs/quick-settings.png)
+
+![Effects & filters: equalizer](docs/effects.png)
 
 ### Keyboard shortcuts (VLC defaults)
 
@@ -140,6 +165,8 @@ manager is needed for the translucent controls (every modern desktop has one).
 | Snapshot | `Shift+S` |
 | Show position | `T` |
 | Playlist / quick settings | `Ctrl+L` / `Ctrl+E` |
+| Effects & filters | `Ctrl+Shift+E` (not a VLC default; `Ctrl+E` is Quick settings) |
+| Rotate / flip horizontally / flip vertically | `Ctrl+Alt+R` / unbound / unbound (assign in Settings → Shortcuts) |
 | Media information | `Ctrl+I` (or `Ctrl+J`) |
 | Settings | `Ctrl+P` |
 | Save playlist | `Ctrl+Y` |
@@ -155,6 +182,9 @@ vlclone/
     vlc_backend.py   libVLC implementation (the only module importing `vlc`)
     fake_backend.py  deterministic in-memory backend for tests / UI work
     controller.py    PlayerController: all player behaviour + observer signals
+    effects.py       effects model, EQ presets, transform composition, Debouncer,
+                     preset + per-file stores
+    session.py       playlist persistence between sessions
     playlist.py      ordering, current item, repeat, shuffle
     abloop.py, stepping.py, timefmt.py, media_sources.py
     m3u.py, resume.py, settings.py, shortcuts.py, paths.py
@@ -162,6 +192,7 @@ vlclone/
     main_window.py   window, sidebar, menus, wiring
     overlay.py       translucent always-on-top controls window over the video
     quick_settings.py popover with pluggable pages
+    effects_panel.py  Effects & filters panel (equalizer, audio, image)
     playlist_panel.py, widgets.py, icons.py (vector, high-DPI), theme.py …
 ```
 
@@ -176,6 +207,20 @@ vlclone/
 * Per-media state (volume, speed, video adjustments, pending resume seek) is
   re-applied when playback actually starts, because libVLC drops some of it
   while a media is still opening.
+* **Live vs. reload effects.** Equalizer, stereo mode, normalization and image
+  adjust use libVLC calls that act on the playing media. Video filters
+  (rotate/flip via `transform`, `sharpen`) are only honoured by libVLC per
+  *instance*, so `VlcBackend` keeps a small LRU of libVLC instances keyed by
+  `EngineFilters` and swaps the player when the media is reloaded. The
+  controller batches requests with a `Debouncer` polled from `tick()` and
+  reuses the reload-with-position path (`_start_current(reload=True)`).
+  Rotation and flips are combined into one of the eight `transform` types.
+* **Volume normalization** has no public libVLC switch (libVLC routes the
+  audio filter chain through its equalizer call). `VlcBackend` sets the
+  chain (`equalizer:normvol`) on the player's audio output through
+  libvlccore's exported variable API, as VLC's own UI does. That relies on the
+  3.0.x plugin ABI, so it only enables itself on libVLC 3.0 and the toggle is
+  disabled (with a tooltip) if the hook isn't available.
 
 ### Adding the later VLC features
 
@@ -192,15 +237,17 @@ The structure is meant to absorb VLC's bigger features without rewrites:
 
 | Future feature | Where it plugs in |
 | --- | --- |
-| Equalizer / audio effects | `libvlc_audio_equalizer_*` in the backend, a quick-settings page |
-| Video effects & filters | media options / `libvlc_video_set_adjust_*` in the backend, a page |
+| Equalizer / audio effects | ✅ phase 2 (`effects.py`, `effects_panel.py`) |
+| Video effects & filters | ✅ phase 2 (adjust live; transform/sharpen via `EngineFilters`) |
+| More VLC video filters (e.g. gradfun, posterize) | add a field to `VideoEffects` + `EngineFilters.vlc_args()`; they reuse the batched reload |
 | Convert / stream out | a `core/transcode.py` driving a second libVLC instance with `:sout=` options, a dialog |
 | DVD / Blu-ray / discs | `dvd://`, `bluray://` MRLs via `controller.open`; chapter/title APIs in the backend |
 | Media library | `core/library.py` (SQLite, folder watching) + a sidebar tab |
 
 ## Status
 
-All eight core-player priorities are implemented:
+All eight core-player priorities (phase 1) and the effects work (phase 2) are
+implemented:
 
 | # | Feature | State |
 | --- | --- | --- |
@@ -212,20 +259,31 @@ All eight core-player priorities are implemented:
 | 6 | Playlist reorder, save/load `.m3u`, per-file resume | ✅ |
 | 7 | Media info (codec, resolution, bitrate, statistics) | ✅ |
 | 8 | VLC default shortcuts, editable | ✅ |
+| P2 | 10-band equalizer, 18 VLC presets, preamp, on/off, custom presets | ✅ live |
+| P2 | Volume normalization (max level), stereo modes | ✅ live (normalization: libVLC 3.0 only) |
+| P2 | Image adjust: brightness, contrast, hue, saturation, gamma | ✅ live |
+| P2 | Flip horizontal/vertical, sharpen with strength | ✅ batched reload |
+| P2 | Effects persisted globally or per file; playlist restored on launch | ✅ |
 
 Known limitations / not yet done:
 
-* Rotation reloads the media (libVLC only applies video filters per
-  instance); position, pause state, tracks, external subtitles and delays are
-  restored, but there is a brief flash.
+* Rotate, flip and sharpen reload the media (libVLC only applies video
+  filters per instance); position, pause state, tracks, external subtitles,
+  delays and live effects are restored, but there is a brief flash. Live
+  streams restart from the live edge.
+* Only the effects themselves persist; geometry (rotation, aspect, crop, zoom,
+  deinterlace) is still per session, as in phase 1.
+* Turning image adjust on or off (moving away from / back to all-neutral
+  values) rebuilds libVLC's video filter chain once, which can show a single
+  dropped frame; moving sliders after that is smooth.
 * Seek preview shows the time under the cursor, not a thumbnail.
-* The playlist is not persisted between sessions (save it as `.m3u`).
 * No single-instance mode / "open with" handoff to an existing window yet.
 * Development and screenshots were done on Linux (X11 + compositor, real
   libVLC 3.0.20). The Windows path (HWND embedding, `libvlc.dll` discovery)
   follows libVLC's documented API but should be smoke-tested on a Windows box.
-* Later phases from the roadmap above: equalizer, effects/filters, convert/
-  stream, discs/DVD menus, media library.
+* Later phases from the roadmap above: convert/stream, discs/DVD menus, media
+  library; more of VLC's effect filters (compressor, spatializer, color
+  threshold, …) can follow the same pattern.
 
 ## Development
 
