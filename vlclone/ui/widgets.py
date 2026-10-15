@@ -80,7 +80,7 @@ class IconButton(QToolButton):
 
 
 class SeekSlider(QWidget):
-    """Timeline with hover time preview, drag-to-seek and A-B markers."""
+    """Timeline with hover time preview, drag-to-seek, A-B and chapter markers."""
 
     seek_requested = Signal(int)  # ms
 
@@ -101,6 +101,7 @@ class SeekSlider(QWidget):
         self._dragging = False
         self._drag_ms = 0
         self._ab: tuple[int | None, int | None] = (None, None)
+        self._chapters: list[tuple[int, str]] = []  # (start ms, title)
         self._grow = 0.0
         self._anim = QVariantAnimation(self, duration=150, easingCurve=QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._set_grow)
@@ -121,6 +122,19 @@ class SeekSlider(QWidget):
     def set_ab(self, a: int | None, b: int | None) -> None:
         self._ab = (a, b)
         self.update()
+
+    def set_chapters(self, chapters: list[tuple[int, str]]) -> None:
+        chapters = sorted(chapters)
+        if chapters != self._chapters:
+            self._chapters = chapters
+            self.update()
+
+    def chapter_at(self, ms: int) -> str:
+        title = ""
+        for start, name in self._chapters:
+            if start <= ms:
+                title = name
+        return title
 
     @property
     def is_dragging(self) -> bool:
@@ -223,6 +237,7 @@ class SeekSlider(QWidget):
             px = self._ms_to_x(self._position)
             p.setBrush(QColor(theme.ACCENT))
             p.drawRoundedRect(QRectF(r.left(), r.top(), px - r.left(), r.height()), radius, radius)
+            self._paint_chapter_marks(p, r)
             knob = 3 + 4 * self._grow
             if knob > 3.2:
                 p.setBrush(QColor("#ffffff"))
@@ -230,7 +245,19 @@ class SeekSlider(QWidget):
 
         if self._hover_x is not None and self._length > 0:
             ms = self._drag_ms if self._dragging else self._x_to_ms(self._hover_x)
-            self._paint_bubble(p, self._ms_to_x(ms), format_ms(ms))
+            chapter = self.chapter_at(ms)
+            chapter = chapter if len(chapter) <= 40 else chapter[:39] + "…"
+            self._paint_bubble(p, self._ms_to_x(ms), f"{format_ms(ms)}  ·  {chapter}" if chapter else format_ms(ms))
+
+    def _paint_chapter_marks(self, p: QPainter, r: QRectF) -> None:
+        """Small gaps in the track at each chapter start (like a segmented timeline)."""
+        if len(self._chapters) < 2:
+            return
+        p.setBrush(QColor(0, 0, 0, 170))
+        for start, _ in self._chapters:
+            if 0 < start < self._length:
+                x = self._ms_to_x(start)
+                p.drawRect(QRectF(x - 1.0, r.top() - 1, 2.0, r.height() + 2))
 
     def _paint_bubble(self, p: QPainter, x: float, text: str) -> None:
         font = theme.app_font(9.5)

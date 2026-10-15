@@ -359,6 +359,85 @@ def _drop(p, c):
     p.drawPolyline(_poly((8.5, 12.5), (12, 16), (15.5, 12.5)))
 
 
+@_icon("library")
+def _library(p, c):
+    _pen(p, c, 1.8)
+    p.drawRoundedRect(QRectF(3.5, 4, 4, 16), 1, 1)
+    p.drawRoundedRect(QRectF(9, 4, 4, 16), 1, 1)
+    p.save()
+    p.translate(17.2, 4.2)
+    p.rotate(14)
+    p.drawRoundedRect(QRectF(0, 0, 4, 15.6), 1, 1)
+    p.restore()
+
+
+@_icon("disc")
+def _disc(p, c):
+    _pen(p, c, 1.8)
+    p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+    p.drawEllipse(QPointF(12, 12), 2.2, 2.2)
+    _pen(p, c, 1.3)
+    p.drawArc(QRectF(6.5, 6.5, 11, 11), 100 * 16, 70 * 16)
+
+
+@_icon("webcam")
+def _webcam(p, c):
+    _pen(p, c, 1.8)
+    p.drawEllipse(QPointF(12, 10), 7, 7)
+    p.drawEllipse(QPointF(12, 10), 2.6, 2.6)
+    p.drawPolyline(_poly((8, 19.5), (16, 19.5)))
+    p.drawLine(QPointF(12, 17), QPointF(12, 19.5))
+
+
+@_icon("film")
+def _film(p, c):
+    _pen(p, c, 1.8)
+    p.drawRoundedRect(QRectF(4, 3.5, 16, 17), 2, 2)
+    p.drawLine(QPointF(8, 3.5), QPointF(8, 20.5))
+    p.drawLine(QPointF(16, 3.5), QPointF(16, 20.5))
+    for y in (8, 12, 16):
+        p.drawLine(QPointF(4, y), QPointF(8, y))
+        p.drawLine(QPointF(16, y), QPointF(20, y))
+
+
+@_icon("music")
+def _music(p, c):
+    _pen(p, c, 1.9)
+    p.drawPolyline(_poly((9, 17), (9, 5.5), (19, 3.5), (19, 15)))
+    _fill(p, c)
+    p.drawEllipse(QPointF(6.8, 17.3), 2.6, 2.1)
+    p.drawEllipse(QPointF(16.8, 15.3), 2.6, 2.1)
+
+
+@_icon("clock")
+def _clock(p, c):
+    _pen(p, c, 1.8)
+    p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+    p.drawPolyline(_poly((12, 7), (12, 12), (15.5, 14)))
+
+
+@_icon("continue")
+def _continue(p, c):
+    _pen(p, c, 1.8)
+    p.drawArc(QRectF(3.5, 3.5, 17, 17), 90 * 16, -300 * 16)
+    _rounded_triangle(p, [(10, 8.5), (16, 12), (10, 15.5)], c)
+
+
+@_icon("refresh")
+def _refresh(p, c):
+    _pen(p, c, 1.9)
+    p.drawArc(QRectF(5, 5, 14, 14), 40 * 16, 280 * 16)
+    _arrow_head(p, c, (17.6, 7.2), -50, 3)
+
+
+@_icon("chapters")
+def _chapters(p, c):
+    _pen(p, c, 1.9)
+    p.drawLine(QPointF(3.5, 12), QPointF(20.5, 12))
+    for x in (8, 14):
+        p.drawLine(QPointF(x, 8), QPointF(x, 16))
+
+
 class _PaintedEngine(QIconEngine):
     def __init__(self, painter: Painter, color: QColor | None) -> None:
         super().__init__()

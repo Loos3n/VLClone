@@ -225,7 +225,7 @@ class QuickSettings(QWidget):
         self.tab_group = QButtonGroup(self)
         self.pages: dict[str, Page] = {}
         self._anchor = QRect()
-        self.setFixedWidth(430)
+        self.setFixedWidth(480)  # five tabs: Playback … Chapters
 
         self._anim = QPropertyAnimation(self, b"windowOpacity", self, duration=160)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -537,3 +537,101 @@ class VideoPage(Page):
         self.sharpen.setChecked(fx.sharpen)
         self.sharpen.setText("On" if fx.sharpen else "Off")
         self.sharpen_strength.set_value(fx.sharpen_strength)
+
+
+class ChaptersPage(Page):
+    """Chapters and titles of the current media, plus disc-menu navigation."""
+
+    def __init__(self, ctl: PlayerController) -> None:
+        super().__init__(ctl)
+        from PySide6.QtWidgets import QFrame, QScrollArea
+
+        from ..core.backend import Track
+        from ..core.discs import is_disc_mrl
+
+        self._Track = Track
+        self._is_disc = is_disc_mrl
+        header = QHBoxLayout()
+        header.addWidget(section("Chapters"))
+        header.addStretch(1)
+        self.prev = chip("‹ Previous", checkable=False)
+        self.prev.setToolTip("Previous chapter (Shift+P)")
+        self.prev.clicked.connect(ctl.previous_chapter)
+        self.next = chip("Next ›", checkable=False)
+        self.next.setToolTip("Next chapter (Shift+N)")
+        self.next.clicked.connect(ctl.next_chapter)
+        header.addWidget(self.prev)
+        header.addWidget(self.next)
+        self.lay.addLayout(header)
+        self.chapters = TrackList(ctl.set_chapter, "No chapters in this media")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(self.chapters)
+        self.chapter_scroll = scroll
+        self.lay.addWidget(scroll)
+
+        self.titles_header = section("Titles")
+        self.lay.addWidget(self.titles_header)
+        self.titles = TrackList(ctl.set_title, "")
+        self.lay.addWidget(self.titles)
+
+        self.disc_header = section("Disc menu")
+        self.lay.addWidget(self.disc_header)
+        self.disc_pad = QWidget()
+        pad = QGridLayout(self.disc_pad)
+        pad.setContentsMargins(0, 0, 0, 0)
+        pad.setSpacing(6)
+        for label, action, r, c in (("↑", "up", 0, 1), ("←", "left", 1, 0), ("OK", "activate", 1, 1),
+                                    ("→", "right", 1, 2), ("↓", "down", 2, 1)):
+            b = chip(label, checkable=False)
+            b.setFixedWidth(56)
+            b.clicked.connect(lambda _=False, a=action: ctl.navigate(a))
+            pad.addWidget(b, r, c)
+        menu = chip("Go to menu", checkable=False)
+        menu.setToolTip("Shift+M")
+        menu.clicked.connect(ctl.disc_menu)
+        pad.addWidget(menu, 0, 4, 1, 1)
+        hint = QLabel("Arrows + Enter also work while a menu is shown.")
+        hint.setObjectName("Muted")
+        pad.addWidget(hint, 2, 3, 1, 3)
+        pad.setColumnStretch(5, 1)
+        self.lay.addWidget(self.disc_pad)
+        self.lay.addStretch(1)
+        ctl.chapters_changed.connect(lambda *_: self.refresh() if self.isVisible() else None)
+        ctl.position_changed.connect(lambda *_: self._sync_current() if self.isVisible() else None)
+
+    def _sync_current(self) -> None:
+        current = self.ctl.current_chapter()
+        if current in self.chapters.buttons and not self.chapters.buttons[current].isChecked():
+            self.chapters.buttons[current].setChecked(True)
+
+    def refresh(self) -> None:
+        from ..core.timefmt import format_ms
+
+        ctl = self.ctl
+        Track = self._Track
+        self.chapters.set_tracks([Track(c.index, f"{c.index + 1}.  {c.title}   ·  {format_ms(c.start_ms)}")
+                                  for c in ctl.chapters], ctl.current_chapter())
+        # Show the whole list up to ~7 rows, then scroll.
+        self.chapters.layout().activate()
+        self.chapter_scroll.setFixedHeight(min(260, max(40, self.chapters.sizeHint().height() + 2)))
+        has_chapters = bool(ctl.chapters)
+        self.prev.setEnabled(has_chapters)
+        self.next.setEnabled(has_chapters or ctl.current_title + 1 < len(ctl.titles))
+        multi_title = len(ctl.titles) > 1
+        self.titles_header.setVisible(multi_title)
+        self.titles.setVisible(multi_title)
+        if multi_title:
+            labels = []
+            for t in ctl.titles:
+                text = "Menu" if t.is_menu else t.name
+                if t.duration_ms > 0 and not t.is_menu:
+                    text += f"   ·  {format_ms(t.duration_ms)}"
+                labels.append(Track(t.index, text))
+            self.titles.set_tracks(labels, ctl.current_title)
+        item = ctl.playlist.current
+        disc = ctl.in_menu or multi_title or bool(item and self._is_disc(item.mrl))
+        self.disc_header.setVisible(disc)
+        self.disc_pad.setVisible(disc)

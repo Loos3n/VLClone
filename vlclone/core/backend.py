@@ -67,6 +67,34 @@ class MediaInfo:
 
 
 @dataclass
+class Chapter:
+    index: int
+    title: str
+    start_ms: int
+    duration_ms: int = -1
+
+
+@dataclass
+class TitleInfo:
+    """A title of a disc (or the single "title" of an ordinary file)."""
+
+    index: int
+    name: str
+    duration_ms: int = -1
+    is_menu: bool = False
+
+
+@dataclass
+class CaptureDevice:
+    id: str  # value handed to the engine (DirectShow name, /dev/video0, hw:1,0 …)
+    name: str
+
+
+#: Disc-menu navigation actions (libVLC's libvlc_navigate_mode_t order).
+NAVIGATE_ACTIONS = ["activate", "up", "down", "left", "right", "popup"]
+
+
+@dataclass
 class VideoOptions:
     """Per-media video adjustments. ``None``/0 means "default"."""
 
@@ -214,3 +242,41 @@ class MediaBackend(ABC):
 
     def set_normalization(self, enabled: bool, level: float) -> None:
         """Volume normalizer (VLC's "normvol" filter) with its maximum level."""
+
+    # --- titles, chapters and disc menus (phase 3)
+    def titles(self) -> list[TitleInfo]:
+        """Titles of the playing media (discs have several; files usually one)."""
+        return []
+
+    def title(self) -> int:
+        return -1
+
+    def set_title(self, index: int) -> None: ...
+
+    def chapters(self) -> list[Chapter]:
+        """Chapters of the current title (MKV/MP4 chapters, DVD/Blu-ray chapters)."""
+        return []
+
+    def chapter(self) -> int:
+        return -1
+
+    def set_chapter(self, index: int) -> None: ...
+
+    def navigate(self, action: str) -> None:
+        """Disc-menu navigation; ``action`` is one of :data:`NAVIGATE_ACTIONS`."""
+
+    def subitems(self) -> list[tuple[str, str]]:
+        """(mrl, title) entries when the loaded media turned out to be a playlist.
+
+        libVLC's Lua playlist scripts (YouTube and similar pages) and remote
+        ``.m3u`` files resolve to sub-items instead of playing; the controller
+        replaces the playlist entry with them, as VLC's own playlist does.
+        """
+        return []
+
+    # --- capture devices
+    def capture_devices(self) -> dict[str, list[CaptureDevice]]:
+        """Video and audio capture devices: ``{"video": [...], "audio": [...]}``."""
+        from .capture import list_devices_generic
+
+        return list_devices_generic()

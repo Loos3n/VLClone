@@ -21,6 +21,7 @@ def read_m3u(path: str) -> list[PlaylistItem]:
     items: list[PlaylistItem] = []
     pending_title = ""
     pending_duration = -1
+    pending_options: list[str] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -35,6 +36,11 @@ def read_m3u(path: str) -> list[PlaylistItem]:
             pending_duration = int(seconds * 1000) if seconds >= 0 else -1
             pending_title = title.strip()
             continue
+        if line.startswith("#EXTVLCOPT:"):
+            option = line[len("#EXTVLCOPT:"):].strip()
+            if option:
+                pending_options.append(option if option.startswith(":") else ":" + option)
+            continue
         if line.startswith("#"):
             continue
         if is_url(line):
@@ -44,7 +50,8 @@ def read_m3u(path: str) -> list[PlaylistItem]:
             if not local.is_absolute():
                 local = base / local
             mrl = path_to_mrl(str(local))
-        items.append(PlaylistItem(mrl, pending_title, pending_duration))
+        items.append(PlaylistItem(mrl, pending_title, pending_duration, options=pending_options))
+        pending_options = []
         pending_title = ""
         pending_duration = -1
     return items
@@ -57,6 +64,7 @@ def write_m3u(path: str, items: list[PlaylistItem]) -> None:
     for item in items:
         seconds = item.duration_ms // 1000 if item.duration_ms and item.duration_ms > 0 else -1
         lines.append(f"#EXTINF:{seconds},{item.title}")
+        lines.extend(f"#EXTVLCOPT:{opt.lstrip(':')}" for opt in item.options)
         local = mrl_to_path(item.mrl)
         if local is None:
             lines.append(item.mrl)

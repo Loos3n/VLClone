@@ -12,6 +12,10 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "open_file": ("Open file", ["Ctrl+O"]),
     "open_folder": ("Open folder", ["Ctrl+F"]),
     "open_url": ("Open network stream", ["Ctrl+N"]),
+    "open_media": ("Open media (all sources)", ["Ctrl+Shift+O"]),
+    "open_disc": ("Open disc", ["Ctrl+D"]),
+    "open_capture": ("Open capture device", ["Ctrl+C"]),
+    "media_library": ("Media library", ["Ctrl+Shift+L"]),
     "load_subtitle": ("Load subtitle file", []),
     "quit": ("Quit", ["Ctrl+Q"]),
     # Playback
@@ -35,6 +39,18 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "ab_loop": ("A-B loop", ["Shift+L"]),
     "cycle_repeat": ("Repeat mode", ["L"]),
     "toggle_shuffle": ("Shuffle", ["R"]),
+    # Chapters, titles and disc menus
+    "next_chapter": ("Next chapter", ["Shift+N"]),
+    "previous_chapter": ("Previous chapter", ["Shift+P"]),
+    "next_title": ("Next title", ["Shift+B"]),
+    "previous_title": ("Previous title", ["Shift+O"]),
+    "disc_menu": ("Disc menu", ["Shift+M"]),
+    # Only active while a disc menu is shown; ← → navigate menus too.
+    "nav_up": ("Disc menu: up", ["Up"]),
+    "nav_down": ("Disc menu: down", ["Down"]),
+    "nav_left": ("Disc menu: left", []),
+    "nav_right": ("Disc menu: right", []),
+    "nav_activate": ("Disc menu: select", ["Return", "Enter"]),
     # Audio
     "volume_up": ("Volume up", ["Ctrl+Up", "Volume Up"]),
     "volume_down": ("Volume down", ["Ctrl+Down", "Volume Down"]),

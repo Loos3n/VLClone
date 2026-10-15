@@ -9,10 +9,13 @@ import ctypes
 import os
 import struct
 import sys
+import threading
+import time
 
 from collections import OrderedDict
 
-from .backend import MediaBackend, MediaInfo, PlaybackState, StreamInfo, Track
+from .backend import (NAVIGATE_ACTIONS, CaptureDevice, Chapter, MediaBackend, MediaInfo, PlaybackState,
+                      StreamInfo, TitleInfo, Track)
 from .effects import EQ_BANDS, EngineFilters
 
 
@@ -164,6 +167,65 @@ def _read_tracks(vlc, media) -> list[dict]:
     return tracks
 
 
+def _load_libvlccore(vlc):
+    """The libvlccore library next to the loaded libVLC (None if not found)."""
+    names = ["libvlccore.dll", "libvlccore.so.9", "libvlccore.dylib"]
+    folder = os.path.dirname(getattr(vlc.dll, "_name", "") or "")
+    candidates = [os.path.join(folder, n) for n in names if folder] + names
+    import ctypes.util
+
+    found = ctypes.util.find_library("vlccore")
+    if found:
+        candidates.append(found)
+    for candidate in candidates:
+        try:
+            return ctypes.CDLL(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def config_choices(vlc, instance, name: str) -> list[tuple[str, str]] | None:
+    """(value, label) choices VLC offers for a string option, e.g. "dshow-vdev".
+
+    This is how VLC's own preferences list DirectShow devices: the option's
+    choices callback lives in the dshow module and enumerates the devices.
+    Uses libvlccore's exported ``config_GetPszChoices`` (stable in 3.0.x);
+    returns None when unavailable.
+    """
+    try:
+        if not _decode(vlc.libvlc_get_version()).startswith("3."):
+            return None
+        core = _load_libvlccore(vlc)
+        if core is None:
+            return None
+        get = core.config_GetPszChoices
+        get.restype = ctypes.c_ssize_t
+        get.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p)),
+                        ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p))]
+        # libvlc_instance_t starts with its libvlc_int_t* (a vlc_object_t).
+        libvlc_int = ctypes.cast(instance._as_parameter_, ctypes.POINTER(ctypes.c_void_p))[0]
+        values = ctypes.POINTER(ctypes.c_char_p)()
+        texts = ctypes.POINTER(ctypes.c_char_p)()
+        count = get(libvlc_int, name.encode(), ctypes.byref(values), ctypes.byref(texts))
+        if count < 0:
+            return None
+        free = vlc.dll.libvlc_free
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = None
+        result = []
+        for i in range(count):
+            result.append((_decode(values[i]), _decode(texts[i])))
+        for array in (values, texts):  # free each string, then the array
+            raw = ctypes.cast(array, ctypes.POINTER(ctypes.c_void_p))
+            for i in range(count):
+                free(raw[i])
+            free(ctypes.cast(array, ctypes.c_void_p))
+        return result
+    except Exception:
+        return None
+
+
 class _AoutFilterHook:
     """Set the audio filter chain on a player's audio output (for "normvol").
 
@@ -209,20 +271,7 @@ class _AoutFilterHook:
 
     @staticmethod
     def _load_core(vlc):
-        names = ["libvlccore.dll", "libvlccore.so.9", "libvlccore.dylib"]
-        folder = os.path.dirname(getattr(vlc.dll, "_name", "") or "")
-        candidates = [os.path.join(folder, n) for n in names if folder] + names
-        import ctypes.util
-
-        found = ctypes.util.find_library("vlccore")
-        if found:
-            candidates.append(found)
-        for candidate in candidates:
-            try:
-                return ctypes.CDLL(candidate)
-            except OSError:
-                continue
-        return None
+        return _load_libvlccore(vlc)
 
     @property
     def available(self) -> bool:
@@ -275,6 +324,7 @@ class VlcBackend(MediaBackend):
         self._handle: int | None = None
         self.player = self._new_player()
         self._media = None
+        self._subitem_media: dict[str, object] = {}  # resolved YouTube/playlist entries, with their options
         self._eq = None
         self._eq_on = False
         self._normalize = (False, 2.0)
@@ -367,7 +417,12 @@ class VlcBackend(MediaBackend):
     def load(self, mrl: str, options: list[str] | None = None) -> None:
         if self._filters != self._player_filters:
             self._swap_player_for_filters()
-        media = self.instance.media_new(mrl)
+        media = self._subitem_media.pop(mrl, None)  # keeps options a Lua script attached
+        if media is None:
+            media = self.instance.media_new(mrl)
+        for stale in self._subitem_media.values():
+            stale.release()
+        self._subitem_media.clear()
         for opt in options or []:
             media.add_option(opt)
         self.player.set_media(media)
@@ -558,6 +613,81 @@ class VlcBackend(MediaBackend):
         chain = ":".join((["equalizer"] if self._eq_on else []) + (["normvol"] if enabled else []))
         self._aout_hook.set_chain(self.player, chain, level)
 
+    # --------------------------------------------- titles, chapters and menus
+    def titles(self) -> list[TitleInfo]:
+        try:
+            descriptions = self.player.get_full_title_descriptions() or []
+        except Exception:
+            return []
+        titles = []
+        for i, d in enumerate(descriptions):
+            name = _decode(d.name).strip() or f"Title {i + 1}"
+            titles.append(TitleInfo(i, name, int(d.duration or -1), bool(d.flags & 0x01)))
+        return titles
+
+    def title(self) -> int:
+        return self.player.get_title()
+
+    def set_title(self, index: int) -> None:
+        self.player.set_title(int(index))
+
+    def chapters(self) -> list[Chapter]:
+        try:
+            descriptions = self.player.get_full_chapter_descriptions(-1) or []
+        except Exception:
+            return []
+        return [Chapter(i, _decode(d.name).strip() or f"Chapter {i + 1}", int(d.time_offset),
+                        int(d.duration or -1)) for i, d in enumerate(descriptions)]
+
+    def chapter(self) -> int:
+        return self.player.get_chapter()
+
+    def set_chapter(self, index: int) -> None:
+        self.player.set_chapter(int(index))
+
+    def navigate(self, action: str) -> None:
+        if action in NAVIGATE_ACTIONS:
+            self.player.navigate(NAVIGATE_ACTIONS.index(action))
+
+    def subitems(self) -> list[tuple[str, str]]:
+        media = self._media
+        if media is None:
+            return []
+        try:
+            items = media.subitems()
+            if items is None:
+                return []
+            result = []
+            items.lock()
+            try:
+                for i in range(items.count()):
+                    sub = items.item_at_index(i)
+                    if sub is None:
+                        continue
+                    mrl = _decode(sub.get_mrl())
+                    result.append((mrl, _decode(sub.get_meta(self.vlc.Meta.Title))))
+                    if mrl in self._subitem_media:
+                        sub.release()
+                    else:
+                        self._subitem_media[mrl] = sub
+            finally:
+                items.unlock()
+                items.release()
+            return result
+        except Exception:
+            return []
+
+    def capture_devices(self) -> dict[str, list[CaptureDevice]]:
+        devices = super().capture_devices()
+        if sys.platform == "win32":
+            for kind, option, default in (("video", "dshow-vdev", "Default camera"),
+                                          ("audio", "dshow-adev", "Default microphone")):
+                choices = config_choices(self.vlc, self.instance, option)
+                if choices is not None:
+                    devices[kind] = [CaptureDevice("", default)] + [
+                        CaptureDevice(value, label or value) for value, label in choices if value not in ("", "none")]
+        return devices
+
     # ----------------------------------------------------------------- info
     def media_info(self) -> MediaInfo:
         media = self.player.get_media()
@@ -615,3 +745,151 @@ class VlcBackend(MediaBackend):
 
     def engine_version(self) -> str:
         return _decode(self.vlc.libvlc_get_version())
+
+
+class VlcMediaProbe:
+    """Media-library metadata and thumbnails through libVLC (a ``MetadataProbe``).
+
+    Uses its own libVLC instance on the library's worker thread. Metadata
+    comes from libVLC's local preparser (tags + demuxer: duration, tracks);
+    thumbnails decode one frame into memory through libVLC's "vmem" video
+    callbacks, so no window or video output is needed. (libVLC 3 has no
+    thumbnailer API; VLC 4 adds one.)
+    """
+
+    PARSE_TIMEOUT_MS = 5000
+    FRAME_TIMEOUT_S = 6.0
+
+    def __init__(self, args: list[str] | None = None) -> None:
+        self.vlc = import_vlc()
+        base = ["--quiet", "--no-video-title-show", "--no-sub-autodetect-file", "--aout=dummy",
+                "--avcodec-hw=none", "--no-stats"]
+        if sys.platform.startswith("linux"):
+            base.append("--no-xlib")
+        self.instance = self.vlc.Instance(base + list(args or []))
+        if self.instance is None:
+            raise LibVlcNotFound("libVLC failed to initialise for the media library")
+
+    def close(self) -> None:
+        try:
+            self.instance.release()
+        except Exception:
+            pass
+
+    def _parse(self, path: str):
+        vlc = self.vlc
+        media = self.instance.media_new_path(path)
+        media.parse_with_options(vlc.MediaParseFlag.local, self.PARSE_TIMEOUT_MS)
+        deadline = time.monotonic() + self.PARSE_TIMEOUT_MS / 1000 + 1
+        while media.get_parsed_status() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return media
+
+    def probe(self, path: str):
+        from .library import MediaMeta
+
+        vlc = self.vlc
+        media = self._parse(path)
+        try:
+            def meta(key: str) -> str:
+                return _decode(media.get_meta(getattr(vlc.Meta, key)))
+
+            info = MediaMeta(title=meta("Title"), artist=meta("Artist"), album=meta("Album"),
+                             album_artist=meta("AlbumArtist"), genre=meta("Genre"), year=meta("Date"),
+                             duration_ms=media.get_duration())
+            try:
+                info.track = int((meta("TrackNumber") or "0").split("/")[0] or 0)
+            except ValueError:
+                info.track = 0
+            try:
+                tracks = _read_tracks(vlc, media)
+            except Exception:
+                tracks = []
+            video = next((t for t in tracks if t["type"] == 1 and t.get("width")), None)
+            if video:
+                info.width, info.height, info.has_video = video["width"], video["height"], True
+            return info
+        finally:
+            media.release()
+
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+        from .png import bgra_to_rgb, write_png
+
+        vlc = self.vlc
+        try:
+            info = self.probe(path)
+        except Exception:
+            info = None
+        aspect = info.width / info.height if info and info.width and info.height else None
+        lock = threading.Lock()
+        # Filled by the format callback: the decoder tells us the picture size and
+        # we ask libVLC to scale it to our width in RV32 (B, G, R, X).
+        state: dict = {"frames": 0, "data": None, "buf": None, "size": None}
+
+        @vlc.CallbackDecorators.VideoFormatCb
+        def on_format(opaque, chroma, w_ptr, h_ptr, pitches, lines):
+            src_w, src_h = w_ptr[0], h_ptr[0]
+            if not src_w or not src_h:
+                return 0
+            # Decoders may report padded sizes (240 → 256); prefer the stream's own aspect.
+            tw = max(16, min(width, src_w)) // 2 * 2
+            th = max(2, int(round(tw / (aspect or src_w / src_h))) // 2 * 2)
+            ctypes.memmove(chroma, b"RV32", 4)
+            w_ptr[0], h_ptr[0] = tw, th
+            pitches[0], lines[0] = tw * 4, th
+            with lock:
+                state["buf"] = (ctypes.c_ubyte * (tw * 4 * th))()
+                state["size"] = (tw, th)
+            return 1
+
+        @vlc.CallbackDecorators.VideoCleanupCb
+        def on_cleanup(opaque):
+            pass
+
+        @vlc.CallbackDecorators.VideoLockCb
+        def on_lock(opaque, planes):
+            planes[0] = ctypes.cast(state["buf"], ctypes.c_void_p)
+            return None
+
+        @vlc.CallbackDecorators.VideoUnlockCb
+        def on_unlock(opaque, picture, planes):
+            pass
+
+        @vlc.CallbackDecorators.VideoDisplayCb
+        def on_display(opaque, picture):
+            with lock:
+                state["frames"] += 1
+                if state["frames"] >= 2 and state["data"] is None:  # first frame after a seek can be stale
+                    state["data"] = bytes(state["buf"])
+
+        player = self.instance.media_player_new()
+        player.video_set_callbacks(on_lock, on_unlock, on_display, None)
+        player.video_set_format_callbacks(on_format, on_cleanup)
+        media = self.instance.media_new_path(path)
+        duration_ms = duration_ms if duration_ms and duration_ms > 0 else (info.duration_ms if info else -1)
+        if duration_ms and duration_ms > 0:
+            # A third in, capped so long films don't need a far seek; skips black intros.
+            media.add_option(f":start-time={min(duration_ms * 0.33, 300_000) / 1000:.2f}")
+        for opt in (":no-audio", ":no-spu", ":input-fast-seek"):
+            media.add_option(opt)
+        player.set_media(media)
+        try:
+            player.play()
+            deadline = time.monotonic() + self.FRAME_TIMEOUT_S
+            while time.monotonic() < deadline:
+                with lock:
+                    if state["data"] is not None:
+                        break
+                if player.get_state() in (vlc.State.Error, vlc.State.Ended):
+                    break
+                time.sleep(0.02)
+        finally:
+            player.stop()
+            player.release()
+            media.release()
+        data, size = state["data"], state["size"]
+        if data is None or size is None:
+            return False
+        tw, th = size
+        write_png(out_path, tw, th, bgra_to_rgb(data, tw, th, tw * 4))
+        return True

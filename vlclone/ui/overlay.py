@@ -47,6 +47,7 @@ class WelcomeCard(QWidget):
             ("Open file", "file", "open_file", True),
             ("Open folder", "folder", "open_folder", False),
             ("Open URL", "link", "open_url", False),
+            ("Library", "library", "media_library", False),
         ):
             b = QPushButton(icon(icon_name, "#1a0f05" if primary else None), f"  {label}")
             if primary:
@@ -55,7 +56,7 @@ class WelcomeCard(QWidget):
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _=False, a=action: trigger(a))
             row.addWidget(b)
-        keys = QLabel("Ctrl+O  ·  Ctrl+F  ·  Ctrl+N")
+        keys = QLabel("Ctrl+O  ·  Ctrl+F  ·  Ctrl+N  ·  Ctrl+Shift+L   —   discs and webcams: Ctrl+Shift+O")
         keys.setObjectName("Muted")
         keys.setAlignment(Qt.AlignCenter)
         lay.addWidget(logo)
@@ -205,6 +206,14 @@ class ControlsPanel(QWidget):
         self.speed_chip.setToolTip("Playback speed")
         self.speed_chip.clicked.connect(lambda: self.trigger("quick_settings_speed"))
         row.addWidget(self.speed_chip)
+        self.chapter_chip = QPushButton()
+        self.chapter_chip.setObjectName("Chip")
+        self.chapter_chip.setCursor(Qt.PointingHandCursor)
+        self.chapter_chip.setFocusPolicy(Qt.NoFocus)
+        self.chapter_chip.setToolTip("Chapters (Shift+P / Shift+N)")
+        self.chapter_chip.clicked.connect(lambda: self.trigger("quick_settings_chapters"))
+        self.chapter_chip.hide()
+        row.addWidget(self.chapter_chip)
         row.addStretch(1)
         add("ab_loop", "ab", "A-B loop (Shift+L)", 38, 24)
         add("cycle_repeat", "repeat", "Repeat (L)", 34, 20)
@@ -409,6 +418,20 @@ class OverlayWindow(QWidget):
         self.controls.buttons["ab_loop"].set_accent(state is not ABState.OFF)
         self.controls.seek.set_ab(a, b)
 
+    def update_chapters(self, chapters, current: int, in_menu: bool = False) -> None:
+        """Chapter marks on the timeline and the "Ch 2/12" chip (hidden without chapters)."""
+        self.controls.seek.set_chapters([(c.start_ms, c.title) for c in chapters] if len(chapters) > 1 else [])
+        chip = self.controls.chapter_chip
+        if in_menu:
+            chip.setText("Disc menu")
+            chip.show()
+        elif len(chapters) > 1 and current >= 0:
+            chip.setText(f"Ch {current + 1}/{len(chapters)}")
+            chip.setToolTip(f"{chapters[current].title} — chapters (Shift+P / Shift+N)")
+            chip.show()
+        else:
+            chip.hide()
+
     def update_fullscreen(self, on: bool) -> None:
         self.controls.buttons["fullscreen"].set_icon_name("fullscreen-exit" if on else "fullscreen")
 
@@ -416,6 +439,8 @@ class OverlayWindow(QWidget):
         """Global rectangle of a control, for anchoring popovers."""
         if name == "speed":
             w = self.controls.speed_chip
+        elif name == "chapters" and self.controls.chapter_chip.isVisible():
+            w = self.controls.chapter_chip
         else:
             w = self.controls.buttons.get(name, self.controls)
         return QRect(w.mapToGlobal(QPoint(0, 0)), w.size())

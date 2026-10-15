@@ -222,6 +222,14 @@ class SettingsDialog(BaseDialog):
         f.spin("seek_medium_s", "Short jump (arrow / Alt+arrow)", 1, 300, " s")
         f.spin("seek_long_s", "Medium jump (Ctrl+arrow)", 5, 1800, " s")
         f.spin("seek_very_long_s", "Long jump (Ctrl+Alt+arrow)", 10, 3600, " s")
+        f.heading("Network streams")
+        f.spin("network_caching_ms", "Network caching", 0, 60000, " ms",
+               "VLC's buffer for streams (default 1000 ms). The Open Media dialog can override it per stream.")
+        f.spin("network_timeout_s", "Give up on streams after", 0, 600, " s",
+               "Streams that never start show an error after this long (0 = wait forever).")
+        f.heading("Media library")
+        f.toggle("library_watch", "Rescan when library folders change")
+        f.toggle("library_thumbnails", "Make video thumbnails")
         f.heading("Mouse")
         f.toggle("pause_on_click", "Click on the video to play / pause")
         f.finish()

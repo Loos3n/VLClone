@@ -6,13 +6,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEasingCurve, QPoint, QRect, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QActionGroup, QCloseEvent
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QSplitter)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QSplitter,
+                               QStackedWidget)
 
 from .. import APP_NAME
 from ..core.backend import PlaybackState
 from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS, ZOOM_LEVELS,
                                PlayerController, zoom_label)
 from ..core.effects import STEREO_MODES
+from ..core.library import LibraryDB
+from ..core.library_scanner import FilenameProbe, LibraryService
 from ..core.m3u import write_m3u
 from ..core.media_sources import (AUDIO_EXTENSIONS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS,
                                   VIDEO_EXTENSIONS, is_subtitle_file, mrl_to_path)
@@ -21,14 +24,16 @@ from ..core.settings import Settings
 from ..core.stepping import RATE_PRESETS
 from ..core.timefmt import format_ms
 from .actions import ActionRegistry
-from .dialogs import JumpToTimeDialog, OpenUrlDialog
+from .dialogs import JumpToTimeDialog
 from .icons import icon
 from .effects_panel import EffectsPanel
+from .library_view import LibraryView
+from .open_media import OpenMediaDialog
 from .media_info import MediaInfoDialog
 from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
 from .settings_dialog import SettingsDialog
-from .quick_settings import AudioPage, QuickSettings, SubtitlesPage, VideoPage
+from .quick_settings import AudioPage, ChaptersPage, QuickSettings, SubtitlesPage, VideoPage
 from .video_surface import VideoSurface
 
 
@@ -49,10 +54,13 @@ SUBTITLE_FILTER = _filter("Subtitles", SUBTITLE_EXTENSIONS) + ";;All files (*)"
 class MainWindow(QMainWindow):
     TICK_MS = 100
 
-    def __init__(self, controller: PlayerController, settings: Settings) -> None:
+    def __init__(self, controller: PlayerController, settings: Settings,
+                 library: LibraryService | None = None) -> None:
         super().__init__()
         self.ctl = controller
         self.settings = settings
+        self.library = library or LibraryService(LibraryDB(), FilenameProbe, watch=settings.library_watch,
+                                                 thumbnails=False)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(icon("cone"))
         self.setAcceptDrops(True)
@@ -67,7 +75,14 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setHandleWidth(3)
         self.splitter.setChildrenCollapsible(False)
-        self.splitter.addWidget(self.video)
+        # The library view takes the video's place; the playlist stays next to it.
+        self.content = QStackedWidget()
+        self.content.addWidget(self.video)
+        self.library_view = LibraryView(self.library, settings, self._resume_entries, self.actions.trigger)
+        self.library_view.open_requested.connect(self._open_from_library)
+        self.library_view.back_requested.connect(self.show_player)
+        self.content.addWidget(self.library_view)
+        self.splitter.addWidget(self.content)
         self.splitter.addWidget(self.sidebar)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
@@ -122,6 +137,7 @@ class MainWindow(QMainWindow):
         quick.add_page("audio", "Audio", AudioPage(self.ctl, lambda: self.open_effects("equalizer")))
         quick.add_page("subtitles", "Subtitles", SubtitlesPage(self.ctl, self.load_subtitle_dialog))
         quick.add_page("video", "Video", VideoPage(self.ctl, self.take_snapshot, lambda: self.open_effects("image")))
+        quick.add_page("chapters", "Chapters", ChaptersPage(self.ctl))
 
     # ================================================================ actions
     def _register_actions(self) -> None:
@@ -130,10 +146,14 @@ class MainWindow(QMainWindow):
         s = self.settings
         a.register("open_file", self.open_file_dialog)
         a.register("open_folder", self.open_folder_dialog)
-        a.register("open_url", self.open_url_dialog)
+        a.register("open_url", lambda: self.open_media_dialog("network"))
+        a.register("open_media", lambda: self.open_media_dialog("file"))
+        a.register("open_disc", lambda: self.open_media_dialog("disc"))
+        a.register("open_capture", lambda: self.open_media_dialog("capture"))
+        a.register("media_library", self.toggle_library)
         a.register("add_files", lambda: self.open_file_dialog(play=False), "Add files…")
         a.register("add_folder", lambda: self.open_folder_dialog(play=False), "Add folder…")
-        a.register("add_url", lambda: self.open_url_dialog(play=False), "Add URL…")
+        a.register("add_url", lambda: self.open_media_dialog("network", play=False), "Add URL…")
         a.register("quit", self.close)
         a.register("play_pause", c.toggle_play)
         a.register("stop", c.stop)
@@ -142,8 +162,12 @@ class MainWindow(QMainWindow):
         a.register("frame_step", c.frame_step)
         for name, attr, sign in (("short", "seek_short_s", 1), ("medium", "seek_medium_s", 1),
                                  ("long", "seek_long_s", 1), ("very_long", "seek_very_long_s", 1)):
-            a.register(f"jump_back_{name}", lambda at=attr: c.seek_relative(-getattr(s, at) * 1000))
-            a.register(f"jump_fwd_{name}", lambda at=attr: c.seek_relative(getattr(s, at) * 1000))
+            # ← / → (the "short jump" keys) move through a disc menu while one is shown.
+            menu_left, menu_right = ("left", "right") if name == "medium" else (None, None)
+            a.register(f"jump_back_{name}", lambda at=attr, d=menu_left: c.navigate(d) if d and c.in_menu
+                       else c.seek_relative(-getattr(s, at) * 1000))
+            a.register(f"jump_fwd_{name}", lambda at=attr, d=menu_right: c.navigate(d) if d and c.in_menu
+                       else c.seek_relative(getattr(s, at) * 1000))
         a.register("goto_time", self.goto_time_dialog)
         a.register("faster", c.faster)
         a.register("slower", c.slower)
@@ -192,6 +216,21 @@ class MainWindow(QMainWindow):
         a.register("flip_vertical", c.toggle_flip_vertical, "Flip vertically")
         a.register("media_info", self.show_media_info)
         a.register("settings", self.show_settings)
+        self.register_disc_actions()
+
+    def register_disc_actions(self) -> None:
+        """Chapters, titles and disc-menu navigation (phase 3)."""
+        a = self.actions
+        c = self.ctl
+        a.register("next_chapter", c.next_chapter)
+        a.register("previous_chapter", c.previous_chapter)
+        a.register("next_title", c.next_title)
+        a.register("previous_title", c.previous_title)
+        a.register("disc_menu", c.disc_menu)
+        a.register("quick_settings_chapters", lambda: self.open_quick_settings("chapters", anchor="chapters"),
+                   "Chapters")
+        for action in ("up", "down", "left", "right", "activate"):
+            a.register(f"nav_{action}", lambda d=action: c.navigate(d)).setEnabled(False)
 
     # ============================================================ controller
     def _connect_controller(self) -> None:
@@ -210,10 +249,42 @@ class MainWindow(QMainWindow):
         c.resumed.connect(lambda pos: ov.toast.show_message(
             f"Resumed at {format_ms(pos)}", "Start over", lambda: c.seek(0)))
         c.tracks_changed.connect(self._update_media_kind)
+        c.chapters_changed.connect(self._on_chapters)
+        c.position_changed.connect(lambda *_: self._update_chapter_chip() if c.chapters else None)
+        c.open_failed.connect(self._on_open_failed)
+        c.media_changed.connect(self._record_history)
         ov.update_volume(c.volume, c.muted)
         ov.update_rate(c.rate)
         ov.update_repeat(c.playlist.repeat)
         ov.update_shuffle(c.playlist.shuffle)
+
+    # ------------------------------------------------------ chapters / errors
+    def _on_chapters(self, chapters, titles, current_title) -> None:
+        self._update_chapter_chip()
+        in_menu = self.ctl.in_menu
+        for action in ("up", "down", "left", "right", "activate"):
+            # Enabled only inside a disc menu, so ↑ ↓ Enter keep their usual meaning elsewhere.
+            self.actions.get(f"nav_{action}").setEnabled(in_menu)
+
+    def _update_chapter_chip(self) -> None:
+        c = self.ctl
+        self.overlay.update_chapters(c.chapters, c.current_chapter(), c.in_menu)
+
+    def _on_open_failed(self, item, message: str) -> None:
+        self.overlay.toast.show_message(message, "Retry", lambda: self._retry(item.uid), ms=12000)
+        self.overlay._place_floating()
+
+    def _retry(self, uid: int) -> None:
+        index = self.ctl.playlist.index_of(uid)
+        if index >= 0:
+            self.ctl.play_index(index)
+
+    def _record_history(self, item) -> None:
+        if item is not None:
+            try:
+                self.library.record_play(item.mrl, item.title)
+            except Exception:  # history is best effort (e.g. read-only data folder)
+                pass
 
     def _osd(self, text: str) -> None:
         if self.settings.show_osd:
@@ -255,6 +326,10 @@ class MainWindow(QMainWindow):
 
     def _tick(self) -> None:
         self.ctl.tick()
+        self.library.tick()
+        if self.library_visible:
+            item = self.ctl.playlist.current if self.ctl.has_media else None
+            self.library_view.set_now_playing(item.title if item else "", self.ctl.is_playing)
         self._sync_overlay()
 
     # =============================================================== overlay
@@ -265,7 +340,8 @@ class MainWindow(QMainWindow):
         # The overlay is a separate always-above window; keep it out of the
         # way while a modal dialog (file picker, settings…) is up.
         modal = QApplication.activeModalWidget()
-        if not self.isVisible() or self.isMinimized() or (modal is not None and modal is not self):
+        if (not self.isVisible() or self.isMinimized() or (modal is not None and modal is not self)
+                or self.library_visible):
             if self.overlay.isVisible():
                 self.overlay.hide()
             return
@@ -305,6 +381,44 @@ class MainWindow(QMainWindow):
     def _video_clicked(self) -> None:
         if self.settings.pause_on_click and self.ctl.has_media:
             self.ctl.toggle_play()
+
+    # =============================================================== library
+    @property
+    def library_visible(self) -> bool:
+        return self.content.currentWidget() is self.library_view
+
+    def show_library(self) -> None:
+        if self.isFullScreen():
+            self.leave_fullscreen()
+        self.quick.hide()
+        self.effects_panel.hide()
+        self.content.setCurrentWidget(self.library_view)
+        self.overlay.hide()
+
+    def show_player(self) -> None:
+        self.content.setCurrentWidget(self.video)
+        self.take_focus()
+        QTimer.singleShot(0, self._sync_overlay)
+
+    def toggle_library(self) -> None:
+        if self.library_visible:
+            self.show_player()
+        else:
+            self.show_library()
+
+    def _open_from_library(self, mrls: list[str], play: bool) -> None:
+        added = self.ctl.open(mrls, play=play)
+        if not play:
+            self.library_view.notify(f"Added {added} item{'s' if added != 1 else ''} to the playlist")
+        elif any(self._is_video_mrl(m) for m in mrls):
+            self.show_player()  # music keeps playing while you browse
+
+    def _is_video_mrl(self, mrl: str) -> bool:
+        item = self.library.db.item_for_mrl(mrl)
+        return item.kind == "video" if item else True
+
+    def _resume_entries(self) -> dict:
+        return self.ctl.resume_entries()
 
     # =============================================================== sidebar
     def toggle_playlist(self) -> None:
@@ -348,6 +462,8 @@ class MainWindow(QMainWindow):
 
     # ============================================================ fullscreen
     def toggle_fullscreen(self) -> None:
+        if self.library_visible:
+            self.show_player()
         if self.isFullScreen():
             self.leave_fullscreen()
         else:
@@ -415,12 +531,36 @@ class MainWindow(QMainWindow):
             self.open_inputs([folder], play)
 
     def open_url_dialog(self, play: bool = True) -> None:
-        dlg = OpenUrlDialog(self.settings.recent_urls, self)
-        if dlg.exec() and dlg.url():
-            url = dlg.url()
-            recent = [u for u in self.settings.recent_urls if u != url]
-            self.settings.recent_urls = [url] + recent[:9]
-            self.open_inputs([url], play)
+        self.open_media_dialog("network", play)
+
+    def open_media_dialog(self, tab: str = "file", play: bool = True) -> OpenMediaDialog:
+        """VLC's Open Media dialog: File, Disc, Network and Capture device tabs."""
+        dlg = OpenMediaDialog(self.ctl.backend, self.settings, tab, self._start_dir(), self)
+        if not play:
+            dlg.play_button.setText("Add")
+        if tab == "network":
+            clip = QApplication.clipboard().text().strip() if QApplication.clipboard() else ""
+            from ..core.network import validate_url
+
+            if clip and "\n" not in clip and "://" in clip and validate_url(clip) is None:
+                dlg.tabs["network"].edit.setText(clip)
+                dlg.tabs["network"].edit.selectAll()
+        if dlg.exec() and dlg.request:
+            r = dlg.request
+            play = play and r.play
+            if r.kind == "file" and self.ctl.has_media and all(is_subtitle_file(i) for i in r.inputs):
+                self.open_inputs(r.inputs)
+            else:
+                added = self.ctl.open(r.inputs, play=play, options=r.options, title=r.title)
+                if not added:
+                    self.overlay.flash("Nothing playable found")
+                elif not play:
+                    self.overlay.flash(f"Added {added} item{'s' if added != 1 else ''}")
+            if r.kind == "file" and r.inputs:
+                self.settings.last_open_dir = str(Path(r.inputs[0]).parent)
+            if play and self.library_visible:
+                self.show_player()
+        return dlg
 
     def goto_time_dialog(self) -> None:
         if not self.ctl.has_media:
@@ -494,11 +634,23 @@ class MainWindow(QMainWindow):
         a = self.actions.get
         c = self.ctl
         menu = QMenu(self)
-        menu.addAction(icon("file"), "Open file…", self.open_file_dialog).setShortcut(a("open_file").shortcut())
-        menu.addAction(icon("folder"), "Open folder…", self.open_folder_dialog).setShortcut(
+        media = menu.addMenu(icon("file"), "Media")
+        media.addAction(icon("file"), "Open file…", self.open_file_dialog).setShortcut(a("open_file").shortcut())
+        media.addAction(icon("folder"), "Open folder…", self.open_folder_dialog).setShortcut(
             a("open_folder").shortcut())
-        menu.addAction(icon("link"), "Open network stream…", self.open_url_dialog).setShortcut(
+        media.addAction(icon("disc"), "Open disc…", lambda: self.open_media_dialog("disc")).setShortcut(
+            a("open_disc").shortcut())
+        media.addAction(icon("link"), "Open network stream…", lambda: self.open_media_dialog("network")).setShortcut(
             a("open_url").shortcut())
+        media.addAction(icon("webcam"), "Open capture device…",
+                        lambda: self.open_media_dialog("capture")).setShortcut(a("open_capture").shortcut())
+        media.addAction("Open media (all sources)…", lambda: self.open_media_dialog("file")).setShortcut(
+            a("open_media").shortcut())
+        media.addSeparator()
+        media.addAction(a("load_playlist"))
+        media.addAction(a("save_playlist"))
+        menu.addAction(icon("library"), "Media library", self.toggle_library).setShortcut(
+            a("media_library").shortcut())
         menu.addSeparator()
 
         playback = menu.addMenu("Playback")
@@ -520,6 +672,7 @@ class MainWindow(QMainWindow):
         shuffle = playback.addAction("Shuffle", c.toggle_shuffle)
         shuffle.setCheckable(True)
         shuffle.setChecked(c.playlist.shuffle)
+        self.extend_chapter_menu(playback)
         playback.addSeparator()
         playback.addAction(a("goto_time"))
         playback.addAction(a("frame_step"))
@@ -536,6 +689,33 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(a("quit"))
         return menu
+
+    def extend_chapter_menu(self, playback: QMenu) -> None:
+        """Chapter / title lists and disc menu entries for the Playback menu."""
+        a = self.actions.get
+        c = self.ctl
+        playback.addSeparator()
+        chapters = playback.addMenu(icon("chapters"), "Chapter")
+        group = QActionGroup(chapters)
+        current = c.current_chapter()
+        for ch in c.chapters:
+            act = chapters.addAction(f"{ch.index + 1}. {ch.title}   ({format_ms(ch.start_ms)})",
+                                     lambda i=ch.index: c.set_chapter(i))
+            act.setCheckable(True)
+            act.setChecked(ch.index == current)
+            group.addAction(act)
+        chapters.setEnabled(bool(c.chapters))
+        if len(c.titles) > 1:
+            titles = playback.addMenu("Title")
+            tgroup = QActionGroup(titles)
+            for t in c.titles:
+                act = titles.addAction("Menu" if t.is_menu else t.name, lambda i=t.index: c.set_title(i))
+                act.setCheckable(True)
+                act.setChecked(t.index == c.current_title)
+                tgroup.addAction(act)
+        playback.addAction(a("previous_chapter"))
+        playback.addAction(a("next_chapter"))
+        playback.addAction(a("disc_menu"))
 
     def extend_menu(self, menu: QMenu) -> None:
         """Audio, subtitle and video submenus (rebuilt each time, so tracks are current)."""
@@ -645,6 +825,8 @@ class MainWindow(QMainWindow):
         self.actions.get("always_on_top").setChecked(s.always_on_top)
         if self.ctl.resume:
             self.ctl.resume.min_position_ms = s.resume_min_seconds * 1000
+        self.library.watch = s.library_watch
+        self.library.thumbnails = s.library_thumbnails
         if s.effects_scope != self._effects_scope:
             new_scope, s.effects_scope = s.effects_scope, self._effects_scope
             self.ctl.set_effects_scope(new_scope)

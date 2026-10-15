@@ -17,23 +17,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _write_test_tone(path: str, seconds: float = 3.0) -> None:
-    import math
-    import struct as _struct
-    import wave
-
-    rate = 22050
-    with wave.open(path, "wb") as wav:
-        wav.setnchannels(2)
-        wav.setsampwidth(2)
-        wav.setframerate(rate)
-        frames = bytearray()
-        for n in range(int(rate * seconds)):
-            sample = int(12000 * math.sin(2 * math.pi * 440 * n / rate))
-            frames += _struct.pack("<hh", sample, sample)
-        wav.writeframes(bytes(frames))
-
-
 def self_test(report: str) -> int:
     """Headless check that the packaged app can load libVLC, play, and apply effects.
 
@@ -50,6 +33,7 @@ def self_test(report: str) -> int:
         from .core.effects import EngineFilters
         from .core.media_sources import path_to_mrl
         from .core.vlc_backend import VlcBackend
+        from .selftest_media import write_tone
 
         backend = VlcBackend(["--quiet", "--vout=dummy", "--aout=dummy"])
         lines.append(f"ok libVLC {backend.engine_version()}")
@@ -57,7 +41,7 @@ def self_test(report: str) -> int:
         lines.append(f"normalization supported: {backend.supports_normalization}")
         with tempfile.TemporaryDirectory() as tmp:
             tone = os.path.join(tmp, "tone.wav")
-            _write_test_tone(tone)
+            write_tone(tone)
             backend.set_engine_filters(EngineFilters("hflip", 0.5))
             backend.load(path_to_mrl(tone))
             backend.play()
@@ -72,6 +56,8 @@ def self_test(report: str) -> int:
                 ok = backend._aout_hook.set_chain(backend.player, "equalizer:normvol", 2.0)
                 lines.append(f"normalization hook applied: {ok}")
             backend.stop()
+            backend.set_engine_filters(EngineFilters())
+            lines.extend(_self_test_phase3(backend, tmp, tone))
         backend.release()
     except Exception as exc:  # report anything: this runs without a console
         lines.append(f"fail {type(exc).__name__}: {exc}")
@@ -79,6 +65,128 @@ def self_test(report: str) -> int:
     with open(report, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return code
+
+
+def make_library(settings, fake: bool = False):
+    """The media library service; metadata and thumbnails come from libVLC unless faked."""
+    from .core.library import LibraryDB
+    from .core.library_scanner import FilenameProbe, LibraryService
+
+    if fake:
+        from .core.fake_backend import FakeProbe
+
+        factory = FakeProbe
+    else:
+        def factory():
+            from .core.vlc_backend import VlcMediaProbe
+
+            try:
+                return VlcMediaProbe()
+            except Exception:  # libVLC trouble must not stop the library from listing files
+                return FilenameProbe()
+
+    service = LibraryService(LibraryDB(), factory, watch=settings.library_watch,
+                             thumbnails=settings.library_thumbnails)
+    if service.folders():
+        service.rescan()  # incremental: picks up what changed while the app was closed
+    return service
+
+
+def _wait(cond, timeout: float = 8.0) -> bool:
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _self_test_phase3(backend, tmp: str, tone: str) -> list[str]:
+    """Chapters, a local HTTP stream, a failing URL, library probe/thumbnail, devices and drives."""
+    import functools
+    import http.server
+    import threading
+
+    from .core.backend import PlaybackState
+    from .core.discs import list_optical_drives
+    from .core.media_sources import path_to_mrl
+    from .core.vlc_backend import VlcMediaProbe
+    from .selftest_media import write_chapter_mkv, write_y4m
+
+    lines: list[str] = []
+
+    def step(name, fn) -> None:
+        try:
+            lines.append(f"{name}: {fn()}")
+        except Exception as exc:  # one failing check must not hide the others
+            lines.append(f"{name}: fail {type(exc).__name__}: {exc}")
+
+    def chapters() -> str:
+        mkv = os.path.join(tmp, "chapters.mkv")
+        write_chapter_mkv(mkv)
+        backend.load(path_to_mrl(mkv))
+        backend.play()
+        if not _wait(lambda: backend.state() is PlaybackState.PLAYING) or not _wait(lambda: backend.chapters()):
+            return f"none (state {backend.state().value})"
+        names = [c.title for c in backend.chapters()]
+        backend.set_chapter(2)
+        jumped = _wait(lambda: backend.time() >= 4000, 4)
+        backend.stop()
+        return f"{len(names)} ({', '.join(names)}); jump {'ok' if jumped else 'failed'}"
+
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args) -> None:  # the windowed exe has no stderr
+            pass
+
+    handler = functools.partial(QuietHandler, directory=tmp)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def http_stream() -> str:
+        backend.load(f"{base}/{os.path.basename(tone)}")
+        backend.play()
+        ok = _wait(lambda: backend.state() is PlaybackState.PLAYING, 10)
+        state = backend.state().value
+        backend.stop()
+        return "playing" if ok else f"not playing ({state})"
+
+    def http_missing() -> str:
+        backend.load(f"{base}/missing.wav")
+        backend.play()
+        _wait(lambda: backend.state() in (PlaybackState.ERROR, PlaybackState.ENDED), 10)
+        state = backend.state().value
+        backend.stop()
+        # libVLC ends (rather than errors) on a 404; the controller reports both as open failures.
+        return f"failed as expected ({state})" if state in ("error", "ended") else f"unexpected {state}"
+
+    def library_probe() -> str:
+        video = os.path.join(tmp, "clip.y4m")
+        write_y4m(video)
+        probe = VlcMediaProbe()
+        try:
+            meta = probe.probe(video)
+            thumb = probe.thumbnail(video, os.path.join(tmp, "thumb.png"), 64)
+        finally:
+            probe.close()
+        return f"{meta.width}x{meta.height} {meta.duration_ms} ms, thumbnail {thumb}"
+
+    def devices() -> str:
+        found = backend.capture_devices()
+        return f"{len(found.get('video', []))} video, {len(found.get('audio', []))} audio"
+
+    try:
+        step("chapters", chapters)
+        step("http stream", http_stream)
+        step("http 404", http_missing)
+    finally:
+        server.shutdown()
+    step("library probe", library_probe)
+    step("capture devices", devices)
+    step("optical drives", lambda: len(list_optical_drives()))
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,7 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     controller = PlayerController(backend, settings, resume, EffectsStore(), EqPresetStore())
     if settings.restore_playlist:
         restore_playlist(controller.playlist)
-    window = MainWindow(controller, settings)
+    library = make_library(settings, fake=args.fake_backend)
+    window = MainWindow(controller, settings, library)
     window.show()
     if args.inputs:
         controller.open(args.inputs)
@@ -141,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         pass
     controller.shutdown()
+    library.shutdown()
     try:
         settings.save()
     except OSError:

@@ -32,6 +32,14 @@ class Settings:
     recursive_folders: bool = True
     restore_playlist: bool = True
 
+    # Network streams
+    network_caching_ms: int = 1000  # VLC's default; sent per stream as :network-caching
+    network_timeout_s: int = 20     # give up on streams that never start (0 = wait forever)
+
+    # Media library
+    library_watch: bool = True      # rescan when watched folders change
+    library_thumbnails: bool = True
+
     # Effects ("global": one set for everything, "per_file": each file remembers its own)
     effects_scope: str = "global"
     effects: dict = field(default_factory=dict)
@@ -59,6 +67,11 @@ class Settings:
     shuffle: bool = False
     last_open_dir: str = ""
     recent_urls: list = field(default_factory=list)
+    library_section: str = "videos"
+    library_sort: str = "title"
+    capture_video_device: str = ""
+    capture_audio_device: str = ""
+    capture_size: str = ""
     window_geometry: str = ""
     shortcuts: dict = field(default_factory=dict)
 
@@ -93,6 +106,8 @@ class Settings:
             self.snapshot_format = "png"
         if self.repeat not in ("none", "all", "one"):
             self.repeat = "none"
+        self.network_caching_ms = min(max(self.network_caching_ms, 0), 60000)
+        self.network_timeout_s = min(max(self.network_timeout_s, 0), 600)
         if self.effects_scope not in ("global", "per_file"):
             self.effects_scope = "global"
 
