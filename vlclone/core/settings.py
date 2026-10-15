@@ -53,6 +53,7 @@ class Settings:
     repeat: str = "none"
     shuffle: bool = False
     last_open_dir: str = ""
+    recent_urls: list = field(default_factory=list)
     window_geometry: str = ""
     shortcuts: dict = field(default_factory=dict)
 

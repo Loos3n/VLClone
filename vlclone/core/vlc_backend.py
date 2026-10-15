@@ -142,7 +142,10 @@ def _read_tracks(vlc, media) -> list[dict]:
 class VlcBackend(MediaBackend):
     def __init__(self, args: list[str] | None = None) -> None:
         self.vlc = import_vlc()
-        self.instance = self.vlc.Instance(args or [])
+        args = list(args or [])
+        if sys.platform.startswith("linux") and "--no-xlib" not in args:
+            args.append("--no-xlib")  # we embed via XCB; Xlib needs XInitThreads
+        self.instance = self.vlc.Instance(args)
         if self.instance is None:
             # Bad user arguments make Instance() fail; fall back to defaults.
             self.instance = self.vlc.Instance(["--quiet"])
