@@ -14,7 +14,7 @@ from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, RO
                                PlayerController, zoom_label)
 from ..core.m3u import write_m3u
 from ..core.media_sources import (AUDIO_EXTENSIONS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS,
-                                  VIDEO_EXTENSIONS, mrl_to_path)
+                                  VIDEO_EXTENSIONS, is_subtitle_file, mrl_to_path)
 from ..core.playlist import RepeatMode
 from ..core.settings import Settings
 from ..core.stepping import RATE_PRESETS
@@ -24,7 +24,7 @@ from .dialogs import JumpToTimeDialog, OpenUrlDialog
 from .icons import icon
 from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
-from .quick_settings import QuickSettings
+from .quick_settings import AudioPage, QuickSettings, SubtitlesPage, VideoPage
 from .video_surface import VideoSurface
 
 
@@ -111,7 +111,9 @@ class MainWindow(QMainWindow):
     # Hook for later feature pages (tracks, video...). Kept separate so the
     # popover can grow without touching the window setup.
     def extend_quick_settings(self, quick: QuickSettings) -> None:
-        pass
+        quick.add_page("audio", "Audio", AudioPage(self.ctl))
+        quick.add_page("subtitles", "Subtitles", SubtitlesPage(self.ctl, self.load_subtitle_dialog))
+        quick.add_page("video", "Video", VideoPage(self.ctl, self.take_snapshot))
 
     # ================================================================ actions
     def _register_actions(self) -> None:
@@ -160,7 +162,23 @@ class MainWindow(QMainWindow):
         self.register_feature_actions()
 
     def register_feature_actions(self) -> None:
-        """Extension point for actions added by later feature groups."""
+        """Tracks, delays and video adjustments."""
+        a = self.actions
+        c = self.ctl
+        a.register("load_subtitle", self.load_subtitle_dialog, "Load subtitle file…")
+        a.register("cycle_audio_track", c.cycle_audio_track)
+        a.register("audio_delay_down", lambda: c.change_audio_delay(-1))
+        a.register("audio_delay_up", lambda: c.change_audio_delay(+1))
+        a.register("cycle_subtitle", c.cycle_subtitle)
+        a.register("toggle_subtitles", c.toggle_subtitles)
+        a.register("subtitle_delay_down", lambda: c.change_subtitle_delay(-1))
+        a.register("subtitle_delay_up", lambda: c.change_subtitle_delay(+1))
+        a.register("cycle_aspect", c.cycle_aspect_ratio)
+        a.register("cycle_crop", c.cycle_crop)
+        a.register("cycle_zoom", c.cycle_zoom)
+        a.register("cycle_deinterlace", c.cycle_deinterlace)
+        a.register("rotate", c.rotate)
+        a.register("snapshot", self.take_snapshot)
 
     # ============================================================ controller
     def _connect_controller(self) -> None:
@@ -351,6 +369,10 @@ class MainWindow(QMainWindow):
     def open_inputs(self, inputs: list[str], play: bool = True) -> None:
         if not inputs:
             return
+        if self.ctl.has_media and all(is_subtitle_file(i) for i in inputs):
+            for path in inputs:  # dropping .srt/.ass on a playing video loads it, like VLC
+                self.ctl.load_subtitle(path)
+            return
         added = self.ctl.open(inputs, play=play)
         if not added:
             self.overlay.flash("Nothing playable found")
@@ -485,7 +507,70 @@ class MainWindow(QMainWindow):
         return menu
 
     def extend_menu(self, menu: QMenu) -> None:
-        """Extension point for feature menus (audio, video, subtitles, ...)."""
+        """Audio, subtitle and video submenus (rebuilt each time, so tracks are current)."""
+        a = self.actions.get
+        c = self.ctl
+
+        def radio(parent: QMenu, items, current, setter) -> None:
+            group = QActionGroup(parent)
+            for label, value in items:
+                act = parent.addAction(label, lambda v=value: setter(v))
+                act.setCheckable(True)
+                act.setChecked(value == current)
+                group.addAction(act)
+
+        audio = menu.addMenu("Audio")
+        tracks = audio.addMenu("Audio track")
+        radio(tracks, [("Off" if t.id == -1 else t.name, t.id) for t in c.audio_tracks()],
+              c.audio_track(), c.set_audio_track)
+        tracks.setEnabled(bool(c.audio_tracks()))
+        audio.addAction(a("cycle_audio_track"))
+        audio.addSeparator()
+        audio.addAction(a("volume_up"))
+        audio.addAction(a("volume_down"))
+        audio.addAction(a("mute"))
+        audio.addSeparator()
+        audio.addAction(a("audio_delay_down"))
+        audio.addAction(a("audio_delay_up"))
+
+        subs = menu.addMenu("Subtitles")
+        subs.addAction(a("load_subtitle"))
+        tracks = subs.addMenu("Subtitle track")
+        radio(tracks, [("Off" if t.id == -1 else t.name, t.id) for t in c.subtitle_tracks()],
+              c.subtitle_track(), c.set_subtitle_track)
+        tracks.setEnabled(bool(c.subtitle_tracks()))
+        subs.addAction(a("toggle_subtitles"))
+        subs.addSeparator()
+        subs.addAction(a("subtitle_delay_down"))
+        subs.addAction(a("subtitle_delay_up"))
+
+        video = menu.addMenu("Video")
+        radio(video.addMenu("Aspect ratio"), [(r or "Default", r) for r in ASPECT_RATIOS],
+              c.video.aspect_ratio, c.set_aspect_ratio)
+        radio(video.addMenu("Crop"), [(r or "None", r) for r in CROP_RATIOS], c.video.crop, c.set_crop)
+        radio(video.addMenu("Zoom"), [(zoom_label(z), z) for z in ZOOM_LEVELS], c.video.zoom, c.set_zoom)
+        radio(video.addMenu("Rotate"), [(f"{r}°", r) for r in ROTATIONS], c.video.rotation, c.set_rotation)
+        radio(video.addMenu("Deinterlace"), [(m or "Off", m) for m in DEINTERLACE_MODES],
+              c.video.deinterlace, c.set_deinterlace)
+        video.addSeparator()
+        video.addAction(a("snapshot"))
+        video.addAction("Reset video adjustments", c.reset_video)
+
+    def load_subtitle_dialog(self) -> None:
+        if not self.ctl.has_media:
+            self.overlay.flash("Play something first")
+            return
+        start = self._start_dir()
+        local = mrl_to_path(self.ctl.playlist.current.mrl) if self.ctl.playlist.current else None
+        if local:
+            start = str(Path(local).parent)
+        path, _ = QFileDialog.getOpenFileName(self, "Load subtitle", start, SUBTITLE_FILTER)
+        if path:
+            self.ctl.load_subtitle(path)
+
+    def take_snapshot(self) -> None:
+        if self.ctl.snapshot() is None and not self.ctl.has_media:
+            self.overlay.flash("Nothing to snapshot")
 
     # ============================================================ shutdown
     def closeEvent(self, e: QCloseEvent) -> None:

@@ -189,6 +189,5 @@ class MediaBackend(ABC):
     def engine_version(self) -> str: ...
 
     # --- optional capabilities (defaults keep older backends working)
-    def rotation_options(self, degrees: int) -> list[str]:
-        """Media options that apply a rotation (libVLC needs a reload for it)."""
-        return []
+    def set_rotation(self, degrees: int) -> None:
+        """Rotation (0/90/180/270) applied from the next :meth:`load` on."""

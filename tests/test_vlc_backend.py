@@ -87,7 +87,15 @@ def test_subtitle_slave(backend, sample, tmp_path):
     assert wait_for(lambda: any(t.id != -1 for t in backend.subtitle_tracks()))
 
 
-def test_rotation_option_loads(backend, sample):
-    backend.load(path_to_mrl(str(sample)), backend.rotation_options(90))
+def test_rotation_swaps_instance_and_plays(backend, sample):
+    backend.set_volume(80)
+    backend.set_rotation(90)
+    backend.load(path_to_mrl(str(sample)))
     backend.play()
     assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
+    assert backend._player_rotation == 90
+    backend.set_rotation(0)
+    backend.load(path_to_mrl(str(sample)))
+    backend.play()
+    assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
+    assert backend._player_rotation == 0

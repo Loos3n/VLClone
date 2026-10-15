@@ -145,13 +145,15 @@ class VlcBackend(MediaBackend):
         args = list(args or [])
         if sys.platform.startswith("linux") and "--no-xlib" not in args:
             args.append("--no-xlib")  # we embed via XCB; Xlib needs XInitThreads
-        self.instance = self.vlc.Instance(args)
-        if self.instance is None:
-            # Bad user arguments make Instance() fail; fall back to defaults.
-            self.instance = self.vlc.Instance(["--quiet"])
-        self.player = self.instance.media_player_new()
-        self.player.video_set_mouse_input(False)
-        self.player.video_set_key_input(False)
+        self._args = args
+        self.instance = self._new_instance(args)
+        # libVLC only honours video filters at instance level, so each
+        # rotation gets its own (lazily created, cached) instance.
+        self._instances = {0: self.instance}
+        self._rotation = 0
+        self._player_rotation = 0
+        self._handle: int | None = None
+        self.player = self._new_player()
         self._media = None
         self._states = {
             self.vlc.State.NothingSpecial: PlaybackState.IDLE,
@@ -164,25 +166,69 @@ class VlcBackend(MediaBackend):
             self.vlc.State.Error: PlaybackState.ERROR,
         }
 
+    def _new_instance(self, args: list[str]):
+        instance = self.vlc.Instance(args)
+        if instance is None:
+            # Bad user arguments make Instance() fail; fall back to defaults.
+            instance = self.vlc.Instance([a for a in args if a in ("--quiet", "--no-xlib")])
+        if instance is None:
+            raise LibVlcNotFound("libVLC failed to initialise")
+        return instance
+
+    def _new_player(self):
+        player = self.instance.media_player_new()
+        player.video_set_mouse_input(False)
+        player.video_set_key_input(False)
+        if self._handle is not None:
+            self._attach(player, self._handle)
+        return player
+
+    @staticmethod
+    def _attach(player, handle: int) -> None:
+        if sys.platform == "win32":
+            player.set_hwnd(handle)
+        elif sys.platform == "darwin":
+            player.set_nsobject(handle)
+        else:
+            player.set_xwindow(handle)
+
     # ------------------------------------------------------------ lifecycle
     def set_video_output(self, handle: int) -> None:
-        if sys.platform == "win32":
-            self.player.set_hwnd(handle)
-        elif sys.platform == "darwin":
-            self.player.set_nsobject(handle)
-        else:
-            self.player.set_xwindow(handle)
+        self._handle = handle
+        self._attach(self.player, handle)
 
     def release(self) -> None:
         try:
             self.player.stop()
             self.player.release()
-            self.instance.release()
+            for instance in self._instances.values():
+                instance.release()
         except Exception:
             pass
 
+    def set_rotation(self, degrees: int) -> None:
+        self._rotation = int(degrees) % 360
+
+    def _swap_player_for_rotation(self) -> None:
+        rotation = self._rotation
+        instance = self._instances.get(rotation)
+        if instance is None:
+            instance = self._new_instance(
+                self._args + ["--video-filter=transform", f"--transform-type={rotation}"])
+            self._instances[rotation] = instance
+        volume = self.player.audio_get_volume()
+        self.player.stop()
+        self.player.release()
+        self.instance = instance
+        self.player = self._new_player()
+        if volume >= 0:
+            self.player.audio_set_volume(volume)
+        self._player_rotation = rotation
+
     # ---------------------------------------------------------------- media
     def load(self, mrl: str, options: list[str] | None = None) -> None:
+        if self._rotation != self._player_rotation:
+            self._swap_player_for_rotation()
         media = self.instance.media_new(mrl)
         for opt in options or []:
             media.add_option(opt)
@@ -302,11 +348,6 @@ class VlcBackend(MediaBackend):
 
     def take_snapshot(self, path: str) -> bool:
         return self.player.video_take_snapshot(0, path, 0, 0) == 0
-
-    def rotation_options(self, degrees: int) -> list[str]:
-        if degrees % 360 == 0:
-            return []
-        return [":video-filter=transform", f":transform-type={degrees % 360}"]
 
     # ----------------------------------------------------------------- info
     def media_info(self) -> MediaInfo:

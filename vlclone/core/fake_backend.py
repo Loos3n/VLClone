@@ -34,6 +34,8 @@ class FakeBackend(MediaBackend):
         self.loads: list[str] = []
         self.frames_stepped = 0
         self.handle: int | None = None
+        self.pending_rotation = 0
+        self.rotation = 0
 
     # helpers for tests
     def advance(self, ms: int) -> None:
@@ -52,6 +54,7 @@ class FakeBackend(MediaBackend):
     def load(self, mrl: str, options: list[str] | None = None) -> None:
         self.mrl = mrl
         self.options = list(options or [])
+        self.rotation = self.pending_rotation
         self.loads.append(mrl)
         self._state = PlaybackState.IDLE
         self._time = 0
@@ -163,8 +166,8 @@ class FakeBackend(MediaBackend):
         self.snapshots.append(path)
         return True
 
-    def rotation_options(self, degrees: int) -> list[str]:
-        return [f":transform-type={degrees}"] if degrees % 360 else []
+    def set_rotation(self, degrees: int) -> None:
+        self.pending_rotation = degrees
 
     def media_info(self) -> MediaInfo:
         if not self.mrl:

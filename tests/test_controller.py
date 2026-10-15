@@ -234,7 +234,7 @@ def test_video_cycles_and_rotation_reload(ctl):
     assert ctl.backend.crop == "16:9" and ctl.backend.zoom == 0.25 and ctl.backend.deinterlace == "blend"
     ctl.seek(40_000)
     ctl.rotate()
-    assert ctl.backend.options == [":transform-type=90"]
+    assert ctl.backend.rotation == 90
     ctl.tick()
     assert ctl.time() == 40_000  # reloaded and restored position
     assert ctl.backend.crop == "16:9"  # options re-applied after reload
@@ -276,3 +276,31 @@ def test_open_playlist_file(ctl, tmp_path):
 def test_shuffle_setting_persisted(ctl):
     ctl.toggle_shuffle()
     assert ctl.settings.shuffle is True and ctl.playlist.shuffle is True
+
+
+def test_rotation_reload_keeps_subtitles_tracks_and_delays(ctl):
+    ctl.open(urls(1))
+    ctl.tick()
+    ctl.load_subtitle("/tmp/extra.srt")
+    ctl.set_audio_track(2)
+    ctl.set_subtitle_delay(300)
+    ctl.seek(10_000)
+    ctl.toggle_ab()
+    ctl.rotate()
+    # the fake backend forgets slaves on reload, like libVLC
+    ctl.backend._subs = ctl.backend._subs[:2]
+    ctl.backend._audio = 1
+    ctl.tick()
+    assert ctl.audio_track() == 2
+    assert any(t.name == "extra.srt" for t in ctl.subtitle_tracks())
+    assert ctl.backend.subtitle_delay == 300
+    assert ctl.ab.state is ABState.A_SET
+
+
+def test_rotate_while_paused_stays_paused(ctl):
+    ctl.open(urls(1))
+    ctl.tick()
+    ctl.pause()
+    ctl.rotate()
+    ctl.tick()
+    assert ctl.backend.state() is PlaybackState.PAUSED

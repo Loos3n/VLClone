@@ -11,7 +11,7 @@ from typing import Callable
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsDropShadowEffect, QGridLayout,
-                               QHBoxLayout, QLabel, QPushButton, QSlider, QStackedWidget,
+                               QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QStackedWidget,
                                QVBoxLayout, QWidget)
 
 from ..core.abloop import ABState
@@ -164,6 +164,7 @@ class QuickSettings(QWidget):
         lay.addWidget(self.stack)
         self.tab_group = QButtonGroup(self)
         self.pages: dict[str, Page] = {}
+        self._anchor = QRect()
         self.setFixedWidth(430)
 
         self._anim = QPropertyAnimation(self, b"windowOpacity", self, duration=160)
@@ -190,44 +191,246 @@ class QuickSettings(QWidget):
         page.setProperty("tab_button", b)
         if len(self.pages) == 1:
             b.setChecked(True)
+        else:
+            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
     def show_page(self, key: str) -> None:
         page = self.pages.get(key)
         if page is None:
             return
         page.property("tab_button").setChecked(True)
+        # Size the popover to the visible page only, not the tallest one.
+        for other in self.pages.values():
+            other.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        page.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.stack.setCurrentWidget(page)
         page.refresh()
-        self.adjustSize()
+        if self.isVisible():
+            # Grow upwards so the popover never covers the control bar.
+            self._fit()
+            self._slide.stop()
+            self.move(self._target_pos())
 
     def _refresh_if_visible(self) -> None:
         if self.isVisible():
             self.stack.currentWidget().refresh()
 
-    def popup(self, anchor: QRect, page: str | None = None) -> None:
-        if page:
-            self.show_page(page)
-        else:
-            self.stack.currentWidget().refresh()
-        self.adjustSize()
+    def _fit(self) -> None:
+        self.frame.layout().activate()
+        self.layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
+
+    def _target_pos(self) -> QPoint:
+        """Bottom-right aligned just above the anchor, kept on screen."""
+        anchor = self._anchor
         screen = QGuiApplication.screenAt(anchor.center()) or QGuiApplication.primaryScreen()
         avail = screen.availableGeometry()
         x = anchor.right() - self.width() + 18
         y = anchor.top() - self.height() + 10
         x = max(avail.left(), min(x, avail.right() - self.width()))
         y = max(avail.top(), y)
+        return QPoint(x, y)
+
+    def popup(self, anchor: QRect, page: str | None = None) -> None:
+        self._anchor = anchor
+        if page:
+            self.show_page(page)
+        else:
+            self.stack.currentWidget().refresh()
+        self._fit()
+        target = self._target_pos()
         self.setWindowOpacity(0.0)
-        self.move(x, y + 12)
+        self.move(target + QPoint(0, 12))
         self.show()
         self._anim.stop()
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
         self._anim.start()
         self._slide.stop()
-        self._slide.setStartValue(QPoint(x, y + 12))
-        self._slide.setEndValue(QPoint(x, y))
+        self._slide.setStartValue(target + QPoint(0, 12))
+        self._slide.setEndValue(target)
         self._slide.start()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        # Qt may grow the window after layout settles; keep the bottom anchored.
+        if self.isVisible() and not self._anchor.isNull():
+            self._slide.stop()
+            self.move(self._target_pos())
 
     def hideEvent(self, e) -> None:
         super().hideEvent(e)
         self.closed.emit()
+
+
+class DelayControl(QWidget):
+    """− value + reset, for audio/subtitle offsets."""
+
+    def __init__(self, on_change: Callable[[int], None], step: int = 50) -> None:
+        super().__init__()
+        self.on_change = on_change
+        self.step = step
+        self.value = 0
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        minus = chip("−", checkable=False)
+        plus = chip("+", checkable=False)
+        minus.setFixedWidth(44)
+        plus.setFixedWidth(44)
+        minus.setAutoRepeat(True)
+        plus.setAutoRepeat(True)
+        minus.clicked.connect(lambda: self.on_change(self.value - self.step))
+        plus.clicked.connect(lambda: self.on_change(self.value + self.step))
+        self.label = QLabel("0 ms")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setMinimumWidth(90)
+        self.reset = chip("Reset", checkable=False)
+        self.reset.clicked.connect(lambda: self.on_change(0))
+        lay.addWidget(minus)
+        lay.addWidget(self.label, 1)
+        lay.addWidget(plus)
+        lay.addWidget(self.reset)
+
+    def set_value(self, ms: int) -> None:
+        from ..core.timefmt import format_delay
+
+        self.value = ms
+        self.label.setText(format_delay(ms))
+        self.reset.setEnabled(ms != 0)
+
+
+class TrackList(QWidget):
+    """Exclusive list of tracks, rebuilt when the track set changes."""
+
+    def __init__(self, on_pick: Callable[[int], None], empty_text: str) -> None:
+        super().__init__()
+        self.on_pick = on_pick
+        self.empty_text = empty_text
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.lay.setSpacing(2)
+        self.group = QButtonGroup(self)
+        self._signature: tuple = ()
+        self.buttons: dict[int, QPushButton] = {}
+
+    def set_tracks(self, tracks, current: int) -> None:
+        signature = tuple((t.id, t.name) for t in tracks)
+        if signature != self._signature:
+            self._signature = signature
+            while self.lay.count():
+                w = self.lay.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            self.buttons = {}
+            if not tracks:
+                lbl = QLabel(self.empty_text)
+                lbl.setObjectName("Muted")
+                self.lay.addWidget(lbl)
+            for t in tracks:
+                name = "Off" if t.id == -1 else t.name
+                b = QPushButton(name)
+                b.setObjectName("ListRow")
+                b.setCheckable(True)
+                b.setCursor(Qt.PointingHandCursor)
+                b.setFocusPolicy(Qt.NoFocus)
+                b.clicked.connect(lambda _=False, i=t.id: self.on_pick(i))
+                self.group.addButton(b)
+                self.lay.addWidget(b)
+                self.buttons[t.id] = b
+        if current in self.buttons:
+            self.buttons[current].setChecked(True)
+
+
+class AudioPage(Page):
+    def __init__(self, ctl: PlayerController) -> None:
+        super().__init__(ctl)
+        self.lay.addWidget(section("Audio track"))
+        self.tracks = TrackList(ctl.set_audio_track, "No audio tracks")
+        self.lay.addWidget(self.tracks)
+        self.lay.addWidget(section("Audio delay"))
+        self.delay = DelayControl(ctl.set_audio_delay)
+        self.lay.addWidget(self.delay)
+        hint = QLabel("Positive values delay the sound (J / K).")
+        hint.setObjectName("Muted")
+        self.lay.addWidget(hint)
+        self.lay.addStretch(1)
+
+    def refresh(self) -> None:
+        self.tracks.set_tracks(self.ctl.audio_tracks(), self.ctl.audio_track())
+        self.delay.set_value(self.ctl.audio_delay)
+
+
+class SubtitlesPage(Page):
+    def __init__(self, ctl: PlayerController, load_file: Callable[[], None]) -> None:
+        super().__init__(ctl)
+        header = QHBoxLayout()
+        header.addWidget(section("Subtitle track"))
+        header.addStretch(1)
+        load = chip("Load file…", checkable=False)
+        load.clicked.connect(load_file)
+        header.addWidget(load)
+        self.lay.addLayout(header)
+        self.tracks = TrackList(ctl.set_subtitle_track, "No subtitles in this media")
+        self.lay.addWidget(self.tracks)
+        self.lay.addWidget(section("Subtitle delay"))
+        self.delay = DelayControl(ctl.set_subtitle_delay)
+        self.lay.addWidget(self.delay)
+        hint = QLabel("Positive values show subtitles later (G / H).")
+        hint.setObjectName("Muted")
+        self.lay.addWidget(hint)
+        self.lay.addStretch(1)
+
+    def refresh(self) -> None:
+        self.tracks.set_tracks(self.ctl.subtitle_tracks(), self.ctl.subtitle_track())
+        self.delay.set_value(self.ctl.subtitle_delay)
+
+
+class VideoPage(Page):
+    def __init__(self, ctl: PlayerController, snapshot: Callable[[], None]) -> None:
+        super().__init__(ctl)
+        from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS,
+                                       ZOOM_LEVELS, zoom_label)
+
+        self.lay.addWidget(section("Aspect ratio"))
+        grid, self.aspect = chip_grid([(r or "Auto", r) for r in ASPECT_RATIOS], ctl.set_aspect_ratio, 5)
+        self.lay.addWidget(grid)
+        self.lay.addWidget(section("Crop"))
+        grid, self.crop = chip_grid([(r or "None", r) for r in CROP_RATIOS], ctl.set_crop, 5)
+        self.lay.addWidget(grid)
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        zoom_col = QVBoxLayout()
+        zoom_col.addWidget(section("Zoom"))
+        grid, self.zoom = chip_grid([(zoom_label(z), z) for z in ZOOM_LEVELS], ctl.set_zoom, 5)
+        zoom_col.addWidget(grid)
+        row.addLayout(zoom_col)
+        self.lay.addLayout(row)
+
+        self.lay.addWidget(section("Rotate"))
+        grid, self.rotation = chip_grid([(f"{r}°", r) for r in ROTATIONS], ctl.set_rotation, 4)
+        self.lay.addWidget(grid)
+
+        self.lay.addWidget(section("Deinterlace"))
+        labels = {None: "Off", "x": "X", "yadif2x": "Yadif 2×", "ivtc": "IVTC"}
+        grid, self.deinterlace = chip_grid(
+            [(labels.get(m, (m or "").capitalize()), m) for m in DEINTERLACE_MODES], ctl.set_deinterlace, 4)
+        self.lay.addWidget(grid)
+
+        actions = QHBoxLayout()
+        shot = chip("Take snapshot", checkable=False)
+        shot.clicked.connect(snapshot)
+        reset = chip("Reset video", checkable=False)
+        reset.clicked.connect(ctl.reset_video)
+        actions.addWidget(shot, 1)
+        actions.addWidget(reset, 1)
+        self.lay.addLayout(actions)
+        self.lay.addStretch(1)
+
+    def refresh(self) -> None:
+        v = self.ctl.video
+        for buttons, value in ((self.aspect, v.aspect_ratio), (self.crop, v.crop), (self.zoom, v.zoom),
+                               (self.rotation, v.rotation), (self.deinterlace, v.deinterlace)):
+            if value in buttons:
+                buttons[value].setChecked(True)

@@ -65,6 +65,8 @@ class PlayerController:
         self._error_streak = 0
         self._known_tracks: tuple = ()
         self._pause_after_start = False
+        self._external_subtitles: list[str] = []
+        self._restore_tracks: tuple[int, int] | None = None
 
         # Signals (UI subscribes)
         self.state_changed = Signal()      # (PlaybackState)
@@ -135,16 +137,27 @@ class PlayerController:
         self.playlist.set_current(index)
         self._start_current()
 
-    def _start_current(self, seek_to: int | None = None) -> None:
+    def _start_current(self, seek_to: int | None = None, reload: bool = False) -> None:
+        """Load and play the current item.
+
+        ``reload`` restarts the same media in place (needed for rotation) and
+        keeps loop points, delays, external subtitles and track choices.
+        """
         item = self.playlist.current
         if item is None:
             return
-        options = self.backend.rotation_options(self.video.rotation)
-        self.backend.load(item.mrl, options)
-        self.ab.clear()
-        self.ab_changed.emit(self.ab.state, None, None)
-        self.audio_delay = 0
-        self.subtitle_delay = 0
+        if reload and self._started:
+            self._restore_tracks = (self.backend.audio_track(), self.backend.subtitle_track())
+        else:
+            self._restore_tracks = None
+        self.backend.set_rotation(self.video.rotation)
+        self.backend.load(item.mrl)
+        if not reload:
+            self.ab.clear()
+            self.ab_changed.emit(self.ab.state, None, None)
+            self.audio_delay = 0
+            self.subtitle_delay = 0
+            self._external_subtitles = []
         self._started = False
         self._known_tracks = ()
         self._pending_seek = seek_to
@@ -155,8 +168,9 @@ class PlayerController:
                 self.resumed.emit(pos)
         self.backend.play()
         self._set_state(PlaybackState.OPENING)
-        self.media_changed.emit(item)
-        self.delays_changed.emit(0, 0)
+        if not reload:
+            self.media_changed.emit(item)
+            self.delays_changed.emit(0, 0)
 
     def play(self) -> None:
         st = self.backend.state()
@@ -365,8 +379,10 @@ class PlayerController:
     def load_subtitle(self, path: str) -> bool:
         if not self.has_media:
             return False
-        ok = self.backend.add_subtitle_file(path_to_mrl(path))
+        mrl = path_to_mrl(path)
+        ok = self.backend.add_subtitle_file(mrl)
         if ok:
+            self._external_subtitles.append(mrl)
             self.osd.emit(f"Subtitle loaded: {Path(path).name}")
             self.tracks_changed.emit()
         else:
@@ -440,7 +456,7 @@ class PlayerController:
             # libVLC applies the transform filter at load time: reload in place.
             was_paused = self.backend.state() is PlaybackState.PAUSED
             position = self.backend.time()
-            self._start_current(seek_to=max(0, position))
+            self._start_current(seek_to=max(0, position), reload=True)
             if was_paused:
                 self._pause_after_start = True
 
@@ -517,6 +533,19 @@ class PlayerController:
         if abs(self.rate - 1.0) > 1e-6:
             self.backend.set_rate(self.rate)
         self._apply_video_options()
+        if self.audio_delay:
+            self.backend.set_audio_delay(self.audio_delay)
+        if self.subtitle_delay:
+            self.backend.set_subtitle_delay(self.subtitle_delay)
+        for mrl in self._external_subtitles:
+            self.backend.add_subtitle_file(mrl)
+        if self._restore_tracks is not None:
+            audio, spu = self._restore_tracks
+            self._restore_tracks = None
+            if audio != -1 and audio in [t.id for t in self.backend.audio_tracks()]:
+                self.backend.set_audio_track(audio)
+            if spu == -1 or spu in [t.id for t in self.backend.subtitle_tracks()]:
+                self.backend.set_subtitle_track(spu)
         if self._pending_seek:
             self.backend.set_time(self._pending_seek)
         self._pending_seek = None
