@@ -49,7 +49,7 @@ class WelcomeCard(QWidget):
             ("Open URL", "link", "open_url", False),
             ("Library", "library", "media_library", False),
         ):
-            b = QPushButton(icon(icon_name, "#1a0f05" if primary else None), f"  {label}")
+            b = QPushButton(icon(icon_name, "@ON_ACCENT" if primary else None), f"  {label}")
             if primary:
                 b.setObjectName("Primary")
             b.setCursor(Qt.PointingHandCursor)
@@ -93,12 +93,10 @@ class AudioCard(QWidget):
 class Toast(QWidget):
     """Small actionable notification, e.g. "Resumed at 12:34 · Start over"."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, icon_color: str | None = "@VIDEO_TEXT") -> None:
         super().__init__(parent)
-        self.setObjectName("Toast")
+        self.setObjectName("Toast")  # styled by the theme's style sheets
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet(f"#Toast {{ background: {theme.OVERLAY_BG}; border: 1px solid {theme.BORDER};"
-                           " border-radius: 12px; }")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 6, 6, 6)
         lay.setSpacing(8)
@@ -107,7 +105,7 @@ class Toast(QWidget):
         self.button.setObjectName("Chip")
         self.button.setCursor(Qt.PointingHandCursor)
         self.button.setFocusPolicy(Qt.NoFocus)
-        close = IconButton("close", "Dismiss", size=26, icon_size=14)
+        close = IconButton("close", "Dismiss", size=26, icon_size=14, color=icon_color)
         close.clicked.connect(self.dismiss)
         lay.addWidget(self.label)
         lay.addWidget(self.button)
@@ -179,7 +177,7 @@ class ControlsPanel(QWidget):
         self.buttons: dict[str, IconButton] = {}
 
         def add(name: str, icon_name: str, tip: str, size: int = 38, isz: int = 22) -> IconButton:
-            b = IconButton(icon_name, tip, size, isz)
+            b = IconButton(icon_name, tip, size, isz, color="@VIDEO_TEXT")
             b.clicked.connect(lambda _=False, a=name: self.trigger(a))
             self.buttons[name] = b
             row.addWidget(b)
@@ -256,6 +254,8 @@ class OverlayWindow(QWidget):
         super().__init__(host, flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setStyleSheet(theme.overlay_style_sheet())
+        theme.notifier().changed.connect(lambda: self.setStyleSheet(theme.overlay_style_sheet()))
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.trigger = trigger
@@ -497,7 +497,9 @@ class OverlayWindow(QWidget):
         if self._drag_active:
             pen = QPen(QColor(theme.ACCENT), 3, Qt.DashLine)
             p.setPen(pen)
-            p.setBrush(QColor(255, 138, 42, 28))
+            fill = QColor(theme.ACCENT)
+            fill.setAlpha(28)
+            p.setBrush(fill)
             p.drawRoundedRect(QRectF(self.rect()).adjusted(12, 12, -12, -12), 16, 16)
 
     # ----------------------------------------------------------------- input

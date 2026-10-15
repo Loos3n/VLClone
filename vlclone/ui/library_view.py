@@ -154,7 +154,7 @@ class CardDelegate(QStyledItemDelegate):
         else:
             p.fillRect(thumb, QColor(theme.SURFACE_2))
             name = "music" if item.kind == "audio" else "film"
-            icon(name, theme.TEXT_FAINT).paint(p, QRect(int(thumb.center().x()) - 18, int(thumb.center().y()) - 18,
+            icon(name, "@TEXT_FAINT").paint(p, QRect(int(thumb.center().x()) - 18, int(thumb.center().y()) - 18,
                                                         36, 36))
         if item.progress > 0:
             p.fillRect(QRectF(thumb.left(), thumb.bottom() - 4, thumb.width(), 4), QColor(255, 255, 255, 60))
@@ -234,7 +234,7 @@ class RowDelegate(QStyledItemDelegate):
         else:
             p.fillRect(art, QColor(theme.SURFACE_2))
             name = "music" if item.kind == "audio" else ("link" if "://" in item.mrl and not item.path else "film")
-            icon(name, theme.TEXT_FAINT).paint(p, QRect(int(art.center().x()) - 11, int(art.center().y()) - 11,
+            icon(name, "@TEXT_FAINT").paint(p, QRect(int(art.center().x()) - 11, int(art.center().y()) - 11,
                                                         22, 22))
         p.setClipping(False)
         x = int(art.right()) + 12
@@ -303,7 +303,7 @@ class LibraryFoldersDialog(BaseDialog):
         row.addWidget(remove)
         self.body.addLayout(row)
         self.error = QLabel()
-        self.error.setStyleSheet("color: #ff5d5d;")
+        self.error.setObjectName("Error")
         self.body.addWidget(self.error)
         for attr, label in (("library_watch", "Rescan automatically when these folders change"),
                             ("library_thumbnails", "Make video thumbnails")):
@@ -357,16 +357,7 @@ class LibraryView(QWidget):
         super().__init__(parent)
         self.setObjectName("Library")
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet(f"""
-            #Library {{ background: {theme.BG}; }}
-            QTreeWidget {{ background: transparent; border: none; outline: none; }}
-            QTreeWidget::item {{ padding: 6px 2px; border-radius: 6px; }}
-            QTreeWidget::item:hover {{ background: {theme.SURFACE_2}; }}
-            QTreeWidget::item:selected {{ background: {theme.SURFACE_3}; color: {theme.TEXT}; }}
-            QHeaderView {{ background: transparent; border: none; }}
-            QHeaderView::section {{ background: transparent; color: {theme.TEXT_MUTED}; border: none;
-                border-bottom: 1px solid {theme.BORDER}; padding: 6px 8px; font-weight: 600; }}
-        """)
+        # Styled by the theme's style sheet (#Library rules), so it follows theme switches.
         self.service = service
         self.settings = settings
         self.resume_entries = resume_entries
@@ -509,7 +500,7 @@ class LibraryView(QWidget):
         eb = QHBoxLayout(self.empty_buttons)
         eb.setAlignment(Qt.AlignCenter)
         for kind, label in FOLDER_KINDS.items():
-            b = QPushButton(icon("film" if kind == "video" else "music", "#1a0f05" if kind == "video" else None),
+            b = QPushButton(icon("film" if kind == "video" else "music", "@ON_ACCENT" if kind == "video" else None),
                             f"  Add {label.lower()} folder…")
             if kind == "video":
                 b.setObjectName("Primary")
@@ -624,7 +615,7 @@ class LibraryView(QWidget):
             self._empty_state()
             self.stack.setCurrentWidget(self.empty)
         elif n == 0:
-            self.empty_icon.setPixmap(icon("info", theme.TEXT_FAINT).pixmap(48, 48))
+            self.empty_icon.setPixmap(icon("info", "@TEXT_FAINT").pixmap(48, 48))
             self.empty_title.setText("No matches")
             self.empty_text.setText(f"Nothing matches “{search}”.")
             self.empty_buttons.hide()
@@ -646,7 +637,7 @@ class LibraryView(QWidget):
                          "Videos you stop part-way through appear here, ready to resume."),
         }
         name, title, text = texts[key]
-        self.empty_icon.setPixmap(icon(name, theme.TEXT_FAINT).pixmap(56, 56))
+        self.empty_icon.setPixmap(icon(name, "@TEXT_FAINT").pixmap(56, 56))
         self.empty_title.setText(title)
         self.empty_text.setText(text)
         self.empty_buttons.setVisible(key in ("videos", "music") and not busy)

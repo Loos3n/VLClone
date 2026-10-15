@@ -19,6 +19,7 @@ from ..core.controller import PlayerController
 from ..core.playlist import RepeatMode
 from ..core.stepping import RATE_PRESETS
 from ..core.timefmt import format_ms
+from . import theme
 
 
 def chip(text: str, checkable: bool = True) -> QPushButton:
@@ -210,7 +211,7 @@ class QuickSettings(QWidget):
         self.frame = QFrame()
         self.frame.setObjectName("Popover")
         shadow = QGraphicsDropShadowEffect(self.frame, blurRadius=36, offset=QPoint(0, 8))
-        shadow.setColor(QColor(0, 0, 0, 150))
+        theme.popover_shadow(shadow)
         self.frame.setGraphicsEffect(shadow)
         outer.addWidget(self.frame)
         lay = QVBoxLayout(self.frame)

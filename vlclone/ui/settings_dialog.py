@@ -141,7 +141,7 @@ class ShortcutsPage(QWidget):
         lay.addWidget(self.table, 1)
         bottom = QHBoxLayout()
         self.warning = QLabel()
-        self.warning.setStyleSheet("color: #ff5d5d;")
+        self.warning.setObjectName("Error")
         self.warning.setWordWrap(True)
         reset = QPushButton("Reset to VLC defaults")
         reset.clicked.connect(self.reset)

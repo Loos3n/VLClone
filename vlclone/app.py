@@ -305,9 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName(APP_NAME)
-    apply_theme(app)
-
     settings = Settings.load()
+    apply_theme(app, settings.theme, settings.accent_color)
     if args.fake_backend:
         from .core.fake_backend import FakeBackend
 

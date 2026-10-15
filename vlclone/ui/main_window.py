@@ -29,6 +29,7 @@ from ..core.playlist import RepeatMode
 from ..core.settings import Settings
 from ..core.stepping import RATE_PRESETS
 from ..core.timefmt import format_ms
+from . import theme
 from .actions import ActionRegistry
 from .dialogs import JumpToTimeDialog
 from .icons import icon
@@ -955,6 +956,8 @@ class MainWindow(QMainWindow):
         if self.ctl.volume > self.ctl.max_volume:
             self.ctl.set_volume(self.ctl.max_volume, show=False)
         self.actions.apply_bindings(s.shortcuts)
+        if (s.theme, s.accent_color) != theme.requested():
+            theme.apply_theme(QApplication.instance(), s.theme, s.accent_color)
         if bool(self.windowFlags() & Qt.WindowStaysOnTopHint) != s.always_on_top:
             self.setWindowFlag(Qt.WindowStaysOnTopHint, s.always_on_top)
             self.show()

@@ -23,6 +23,7 @@ from ..core.discs import DISC_KINDS, DiscRequest, detect_disc_kind, disc_mrl, di
 from ..core.network import UrlHistory, caching_option, normalize_url, stream_kind, validate_url
 from ..core.settings import Settings
 from ..core.timefmt import parse_time
+from . import theme
 from .dialogs import BaseDialog
 from .icons import icon
 from .quick_settings import chip, section
@@ -319,7 +320,7 @@ class NetworkTab(_Tab):
         self.clear = QPushButton("Clear history")
         self.clear.setFlat(True)
         self.clear.setCursor(Qt.PointingHandCursor)
-        self.clear.setStyleSheet("QPushButton { background: transparent; border: none; color: #9aa2b1; }")
+        self.clear.setObjectName("Flat")
         self.clear.clicked.connect(self._clear_history)
         head.addWidget(self.clear)
         self.lay.addLayout(head)
@@ -381,7 +382,7 @@ class NetworkTab(_Tab):
             self.kind.setText("")
             return
         error = validate_url(text)
-        self.kind.setStyleSheet("color: #ff5d5d;" if error else "")
+        theme.set_error(self.kind, bool(error))
         self.kind.setText(error or f"Detected: {stream_kind(text)}")
 
     def on_shown(self) -> None:
@@ -614,7 +615,7 @@ class OpenMediaDialog(BaseDialog):
         self.body.addLayout(more)
 
         self.error = QLabel()
-        self.error.setStyleSheet("color: #ff5d5d;")
+        self.error.setObjectName("Error")
         self.error.setWordWrap(True)
         self.body.addWidget(self.error)
 

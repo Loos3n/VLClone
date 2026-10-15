@@ -16,6 +16,7 @@ from PySide6.QtGui import (QColor, QFont, QIcon, QIconEngine, QPainter, QPainter
 from . import theme
 
 Painter = Callable[[QPainter, QColor], None]
+CONE_ORANGE = "#ff8a2a"
 _REGISTRY: dict[str, Painter] = {}
 
 
@@ -342,12 +343,12 @@ def _check(p, c):
 
 @_icon("cone")
 def _cone(p, c):
-    _fill(p, QColor(theme.ACCENT))
+    _fill(p, QColor(CONE_ORANGE))  # the logo keeps VLC's orange whatever the accent
     p.drawPolygon(_poly((9.2, 3.5), (14.8, 3.5), (19, 17), (5, 17)))
     _fill(p, QColor("#ffffff"))
     p.drawPolygon(_poly((8.1, 7.2), (15.9, 7.2), (16.7, 9.8), (7.3, 9.8)))
     p.drawPolygon(_poly((6.6, 12.1), (17.4, 12.1), (18.2, 14.6), (5.8, 14.6)))
-    _fill(p, QColor(theme.ACCENT))
+    _fill(p, QColor(CONE_ORANGE))
     p.drawRoundedRect(QRectF(3, 16.5, 18, 4), 1.5, 1.5)
 
 
@@ -464,13 +465,13 @@ def _stream(p, c):
 
 
 class _PaintedEngine(QIconEngine):
-    def __init__(self, painter: Painter, color: QColor | None) -> None:
+    def __init__(self, painter: Painter, color: str | None) -> None:
         super().__init__()
         self._painter = painter
-        self._color = color
+        self._color = color  # a colour, a theme token ("@ACCENT"), or None = the theme's text
 
     def _color_for(self, mode: QIcon.Mode) -> QColor:
-        c = QColor(self._color or theme.TEXT)
+        c = QColor(theme.resolve(self._color) if self._color else theme.TEXT)
         if mode == QIcon.Disabled:
             c.setAlphaF(0.35)
         elif mode == QIcon.Active:
@@ -507,12 +508,14 @@ _cache: dict[tuple[str, str], QIcon] = {}
 
 
 def icon(name: str, color: str | None = None) -> QIcon:
+    """A painted icon. ``color`` is a colour, a theme token like ``"@ACCENT"`` (follows theme
+    changes) or None for the current theme's text colour."""
     key = (name, color or "")
     if key not in _cache:
         painter = _REGISTRY.get(name)
         if painter is None:
             raise KeyError(f"unknown icon {name!r}")
-        _cache[key] = QIcon(_PaintedEngine(painter, QColor(color) if color else None))
+        _cache[key] = QIcon(_PaintedEngine(painter, color))
     return _cache[key]
 
 

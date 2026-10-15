@@ -50,7 +50,7 @@ class JumpToTimeDialog(BaseDialog):
             row.addWidget(total)
         self.body.addLayout(row)
         self.error = QLabel("")
-        self.error.setStyleSheet("color: #ff5d5d;")
+        self.error.setObjectName("Error")
         self.body.addWidget(self.error)
         self.add_buttons("Go")
 
