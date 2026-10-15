@@ -374,7 +374,7 @@ def job_status(job: ConvertJob) -> str:
             text += f"  ·  {format_ms(int(job.eta_s * 1000))} left"
         return text
     if job.state is JobState.DONE:
-        return f"Done  ·  {Path(job.output).name}"
+        return f"Done  ·  saved in {Path(job.output).parent}"
     if job.state is JobState.CANCELLED:
         return "Cancelled"
     return f"Failed: {job.error}"
@@ -414,6 +414,9 @@ class JobRow(QFrame):
         self.status = QLabel()
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
+        for label in (self.title, self.detail, self.status):  # long names wrap instead of widening the panel
+            label.setMinimumWidth(1)
+        self.detail.setWordWrap(True)
         self.refresh()
 
     def _action(self, key: str) -> None:
@@ -434,7 +437,8 @@ class JobRow(QFrame):
     def refresh(self) -> None:
         job = self.job
         self.title.setText(job.title)
-        self.detail.setText(f"{job.preset.label}  →  {job.output}")
+        self.detail.setText(f"{job.preset.label}  →  {Path(job.output).name}")
+        self.detail.setToolTip(job.output)
         self.bar.setVisible(not job.finished)
         self.bar.setRange(0, 0 if job.live and job.state is JobState.RUNNING else 1000)
         self.bar.setValue(int(job.progress * 1000))
@@ -482,6 +486,7 @@ class ConvertQueuePanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(self.list)
         lay.addWidget(scroll, 1)
         self.rows: dict[int, JobRow] = {}

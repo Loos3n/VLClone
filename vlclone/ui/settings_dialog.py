@@ -267,6 +267,13 @@ class SettingsDialog(BaseDialog):
         browse.clicked.connect(lambda: self._browse(row_edit))
         f.lay.addWidget(browse, 0, Qt.AlignRight)
         f.combo("snapshot_format", "Format", [("PNG", "png"), ("JPEG", "jpg")])
+        f.heading("Recordings", "Record (Shift+R) and Capture → Record to file save here.")
+        from ..core.paths import default_videos_dir
+
+        rec_edit = f.text("record_dir", "Folder", default_videos_dir(), width=260)
+        rec_browse = QPushButton("Browse…")
+        rec_browse.clicked.connect(lambda: self._browse(rec_edit))
+        f.lay.addWidget(rec_browse, 0, Qt.AlignRight)
         f.finish()
         page("Interface", f)
 
@@ -308,7 +315,7 @@ class SettingsDialog(BaseDialog):
             setter(getattr(self.settings, field))
 
     def _browse(self, edit: QLineEdit) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Snapshot folder", edit.text())
+        folder = QFileDialog.getExistingDirectory(self, "Choose a folder", edit.text())
         if folder:
             edit.setText(folder)
 

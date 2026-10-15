@@ -337,6 +337,17 @@ def test_quit_saves_an_active_recording(window, engine, tmp_path):
     assert job.state is JobState.DONE and os.path.exists(job.output)
 
 
+def test_settings_page_has_recordings_folder(window, tmp_path):
+    from vlclone.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(window.settings, window.apply_settings, window)
+    setter = next(set_ for field, _, set_ in dlg._bindings if field == "record_dir")
+    setter(str(tmp_path / "elsewhere"))
+    dlg.accept()
+    assert window.settings.record_dir == str(tmp_path / "elsewhere")
+    assert window.recorder.folder() == str(tmp_path / "elsewhere")
+
+
 def test_menu_has_convert_stream_record(window):
     menu = window.build_menu()
     media_menu = next(a.menu() for a in menu.actions() if a.text() == "Media")

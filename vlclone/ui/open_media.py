@@ -412,7 +412,7 @@ class CaptureTab(_Tab):
         sources = QHBoxLayout()
         self.source_group = QButtonGroup(self)
         self.source_buttons: dict[str, QPushButton] = {}
-        for key, label in (("devices", "Camera & microphone"), ("screen", "Screen")):
+        for key, label in (("devices", "Camera && microphone"), ("screen", "Screen")):
             b = chip(label)
             self.source_group.addButton(b)
             b.clicked.connect(lambda _=False, k=key: self.set_source(k))

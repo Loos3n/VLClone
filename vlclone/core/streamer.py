@@ -89,7 +89,9 @@ class HttpStreamer:
             return f"Port {port} is already in use; pick another one"
         opts = [o for o in options if not o.startswith((":sout", ":start-time"))]
         opts.append(f":sout={stream_sout(mode, port)}")
-        opts.append(":sout-all" if mode == "copy" else ":no-sout-spu")
+        if mode == "copy":
+            opts.append(":sout-all")  # every audio track (languages)
+        opts.append(":no-sout-spu")  # MPEG-TS cannot carry text subtitles
         if start_ms > 0:
             opts.append(f":start-time={start_ms / 1000:.3f}")
         try:

@@ -170,6 +170,33 @@ manager is needed for the translucent controls (every modern desktop has one).
   file at the same position (keeping pause state, tracks, subtitles, delays,
   A-B points). Several changes in a row are batched into one reload about
   0.6 s after the last one.
+* **Convert / save** (`Ctrl+R`, *Media* menu, or right-click in the playlist or
+  library → *Convert / save…*; drop files on the dialog to add them): pick a
+  format, where to save (a folder, remembered, or next to each source) and
+  optionally the resolution, video quality, audio bitrate, a trim range and
+  subtitles to burn in. Several files make a batch. Formats this VLC cannot
+  write are greyed out with the reason (see the table below).
+  Conversions run in a separate libVLC instance, so playback carries on. The
+  *Conversions* panel shows each job's progress and time left, with *Cancel*,
+  *Show* (opens the folder), *Retry* and *Clear finished*; a toast says when a
+  file is saved or why it failed. A job writes `name.ext.part` and only a
+  verified result gets the real name; cancelling, a failure or quitting deletes
+  the partial file, and an existing file is never overwritten (`film (1).mp4`).
+* **Record** (`Shift+R`, or the ● button): records what is playing until you
+  press it again; a red **● REC 0:12** stays on screen meanwhile. Files and other
+  seekable media are saved as the stretch you watched, copied without
+  re-encoding; live streams (IPTV, RTSP, radio) are copied to disk by a second
+  connection while you watch. Recordings go to the folder in Settings → Interface →
+  *Recordings* (default: Videos) as MKV.
+* **Screen and camera recording**: Open Media → *Capture device* → *Screen*
+  (frame rate, optional region, follow the mouse) or *Camera & microphone*, then
+  **● Record to file**; stop it from the Conversions panel. Saved as MKV
+  (H.264 + AAC).
+* **Stream** (`Ctrl+S`): serves the current media to your network over HTTP as
+  MPEG-TS, either the original streams or re-encoded to H.264 + AAC. Choose the
+  port, copy the address shown (`http://192.168.x.y:8080/stream`) into VLC on
+  another device, *Stop streaming* when done. The stream starts at the current
+  position and then runs on its own.
 * **Effect settings persist**, either one set for every file (default) or per
   file (Settings → Audio & video → *Effect settings apply to*). Per-file mode:
   each file remembers its own effects; new files start from the global set.
@@ -196,6 +223,51 @@ manager is needed for the translucent controls (every modern desktop has one).
 </p>
 
 ![Media library: music](docs/library-music.png)
+
+<p>
+  <img src="docs/convert.png" alt="Convert / save" width="380">
+  <img src="docs/conversions.png" alt="Conversions panel" width="420">
+</p>
+
+![Recording: the REC indicator](docs/recording.jpg)
+
+<p>
+  <img src="docs/stream.png" alt="Stream dialog" width="400">
+  <img src="docs/capture-screen.png" alt="Screen capture" width="420">
+</p>
+
+### Convert formats
+
+VLClone converts a tiny generated clip with every preset the first time it
+runs (about 3 s in the background, cached per libVLC version) and checks the
+codecs actually written, so a preset that only *seems* to work is disabled.
+
+| Preset | sout chain (simplified) | Bundled libVLC 3.0.21 (Windows) | libVLC 3.0.20 (Ubuntu 24.04) |
+| --- | --- | --- | --- |
+| MP4 — H.264 + AAC | `vcodec=h264,acodec=mp4a` → `mux=mp4` | ✅ | ✅ |
+| MKV — H.264 + AAC | `vcodec=h264,acodec=mp4a` → `mux=mkv` | ✅ | ✅ |
+| MKV — H.265 + AAC | `vcodec=hevc,acodec=mp4a` → `mux=mkv` | ✅ | ✅ |
+| WebM — VP8 + Vorbis | `vcodec=VP80,acodec=vorb` → `mux=webm` | ✅ | ✅ |
+| WebM — VP9 + Opus | `vcodec=VP90,acodec=opus` → `mux=webm` | ✅ | ✅ |
+| MP3 | `acodec=mp3` → `mux=raw` | ✅ | ✅ |
+| FLAC | `acodec=flac` → `mux=raw` | ✅ | ✅ |
+| OGG — Vorbis / Opus | `acodec=vorb` / `opus` → `mux=ogg` | ✅ | ✅ |
+| Audio only — AAC (M4A) | `acodec=mp4a` → `mux=mp4` | ✅ | ✅ |
+| Remux to MKV / MP4 | no transcode, `:sout-all` | ✅ | ✅ |
+
+No preset is disabled on either build (the Windows column comes from the
+build's self-test). Things the probing turned up:
+
+* `acodec=mpga` writes MPEG-1 **layer II** into a `.mp3`; the MP3 preset uses
+  `acodec=mp3` and the check reads the frame header to make sure it is layer III.
+* A remux (stream copy) can only start at a keyframe: a trim starting at 0:05
+  begins at the keyframe before it. Re-encoding presets trim exactly.
+* Remux to MP4 accepts H.264/H.265/MPEG-4 video and AAC/MP3/AC-3/ALAC audio;
+  other codecs are refused before starting with a pointer to Remux to MKV.
+* When a *live* input (screen, camera, live stream) is stopped, libVLC 3 drops
+  the frames x264 holds in its look-ahead, and cannot finish an MP4 at all.
+  Live recordings therefore use `venc=x264{tune=zerolatency}` and MKV (MPEG-TS
+  if Matroska were unavailable).
 
 ### Keyboard shortcuts (VLC defaults)
 
@@ -227,6 +299,8 @@ manager is needed for the translucent controls (every modern desktop has one).
 | Next / previous title, disc menu | `Shift+B` / `Shift+O`, `Shift+M` |
 | Disc menu navigation | `↑` `↓` `←` `→` `Enter` (only while a menu is shown) |
 | Media library | `Ctrl+Shift+L` |
+| Convert / save, stream | `Ctrl+R`, `Ctrl+S` |
+| Record / stop recording | `Shift+R` |
 | Media information | `Ctrl+I` (or `Ctrl+J`) |
 | Settings | `Ctrl+P` |
 | Save playlist | `Ctrl+Y` |
@@ -251,6 +325,10 @@ vlclone/
     library.py       media library store (SQLite): folders, metadata, history
     library_scanner.py  background scan, folder watching, thumbnails (LibraryService)
     png.py           tiny PNG writer for thumbnails
+    transcode.py     convert presets, sout chains, output naming and checks
+    converter.py     TranscodeEngine contract, ConvertQueue, preset probe
+    recorder.py      Record button (segment remux / live copy)
+    streamer.py      HTTP streaming of the current media
     session.py       playlist persistence between sessions
     playlist.py      ordering, current item, repeat, shuffle
     abloop.py, stepping.py, timefmt.py, media_sources.py
@@ -260,7 +338,9 @@ vlclone/
     overlay.py       translucent always-on-top controls window over the video
     quick_settings.py popover with pluggable pages (… Video, Chapters)
     effects_panel.py  Effects & filters panel (equalizer, audio, image)
-    open_media.py    Open Media dialog (File, Disc, Network, Capture device)
+    open_media.py    Open Media dialog (File, Disc, Network, Capture device + screen)
+    convert_dialog.py Convert / save dialog and the Conversions panel
+    stream_dialog.py Stream dialog
     library_view.py  media library view, folder manager
     playlist_panel.py, widgets.py, icons.py (vector, high-DPI), theme.py …
 ```
@@ -313,6 +393,18 @@ vlclone/
   way in through libVLC's `vmem` callbacks (no window needed) and are written
   with a small PNG encoder. Folder changes are noticed by comparing directory
   modification times every 30 s.
+* **Convert, record and stream share a second libVLC instance**
+  (`VlcTranscoder`, behind the `TranscodeEngine` contract; `FakeTranscoder` in
+  tests). A job is a media player whose media carries `:sout=#transcode{…}:
+  std{access=file,mux=…,dst='…'}` (or `access=http` for streaming), so nothing is
+  shown or heard and the main player is untouched. `ConvertQueue` runs one file
+  conversion at a time with live jobs alongside and is polled from the UI timer;
+  progress is the job's time over the (trimmed) length. Finishing means
+  stopping the player (muxers write their index then), checking the result's
+  codecs and renaming the `.part` file.
+* **Recording** has no public libVLC 3 call (VLC uses an internal input
+  variable), so it reuses the convert pipeline: segment remux for seekable
+  media, a parallel copy for live streams.
 
 ### Adding the later VLC features
 
@@ -336,12 +428,14 @@ The structure is meant to absorb VLC's bigger features without rewrites:
 | DVD / Blu-ray / discs, chapters | ✅ phase 3 (`discs.py`, chapter/title/navigate in the backend) |
 | Network streams, capture devices | ✅ phase 3 (`network.py`, `capture.py`, Open Media dialog) |
 | Media library | ✅ phase 3 (`library.py`, `library_scanner.py`, `library_view.py`) |
+| Convert / stream out / record | ✅ phase 4 (`transcode.py`, `converter.py`, `recorder.py`, `streamer.py`) |
 | Playlists/podcasts/UPnP discovery | a backend `media_discoverer` wrapper + a library section |
 
 ## Status
 
-All eight core-player priorities (phase 1), the effects work (phase 2) and
-media sources + library (phase 3) are implemented:
+All eight core-player priorities (phase 1), the effects work (phase 2), media
+sources + library (phase 3) and convert/record/stream (phase 4) are
+implemented:
 
 | # | Feature | State |
 | --- | --- | --- |
@@ -365,6 +459,11 @@ media sources + library (phase 3) are implemented:
 | P3 | Webcam / microphone via DirectShow, resolution and frame rate | ✅ (needs a Windows test with a camera) |
 | P3 | Media library: watched folders, background scan, SQLite, metadata, thumbnails, four views, search/sort | ✅ |
 | P3 | Rotation, aspect, crop, zoom, deinterlace persisted with the effects scope | ✅ |
+| P4 | Convert / save: 12 presets, batch queue, scale, bitrates, trim, subtitle burn-in, separate engine | ✅ (every preset converted and checked with real libVLC; MP4 + MP3 on Windows in CI) |
+| P4 | Presets probed at runtime and disabled with a reason when unsupported | ✅ |
+| P4 | Queue: progress, ETA, cancel, show in folder, retry; no partial files left | ✅ |
+| P4 | Record (Shift+R) with REC indicator; screen and camera recording | ✅ (screen recording tested on X11; needs a Windows check) |
+| P4 | HTTP streaming (copy or H.264 + AAC, port, URL) | ✅ (fetched locally in tests and in the Windows self-test) |
 
 Known limitations / not yet done:
 
@@ -400,8 +499,20 @@ Known limitations / not yet done:
 * Folder watching compares directory times every 30 s rather than using OS
   change notifications; renaming a file inside an existing folder is picked
   up on that check, edits to a file's tags on the next launch or *Rescan*.
-* Later phases from the roadmap: convert/stream (sout), network discovery
-  (UPnP/SMB), more of VLC's effect filters.
+* Recording a file saves the stretch between pressing Record and stopping,
+  measured on the media's timeline; seeking while recording changes what that
+  stretch is. It starts at the keyframe before the start (stream copy).
+* The Record button does not record cameras or the screen (a capture device
+  cannot be opened twice); use Capture → *Record to file* for those. Live MP4
+  is not possible with libVLC 3, so all live recordings are MKV.
+* Streaming re-opens the media in the second engine from the current position;
+  pausing or seeking the player afterwards does not affect the stream. Only
+  MPEG-TS over HTTP is offered (players like VLC, mpv, Kodi read it; browsers do
+  not). Windows Firewall asks the first time.
+* Conversions are not resumable: quitting with conversions running asks first
+  and then cancels them (a running recording is saved).
+* Later phases from the roadmap: network discovery (UPnP/SMB), more of VLC's
+  effect filters.
 
 ## Development
 
@@ -422,4 +533,12 @@ writes a chaptered Matroska file and a Y4M video in pure Python otherwise.
 through a filtered instance, applies the effects, reads chapters from a
 generated MKV and jumps between them, plays a local HTTP stream, checks that a
 404 fails, makes a library thumbnail and lists capture devices and optical
-drives.
+drives, runs an MP4 and an MP3 conversion through the queue, probes every
+convert preset (the build shows the working/disabled lists as notices) and
+fetches an HTTP stream.
+
+`tests/test_vlc_phase4.py` converts a clip with every preset the local libVLC
+supports and checks the codecs with VLC and `ffprobe`, checks exact trims and
+scaling, remuxes both ways, cancels mid-way, records a file segment and a live
+HTTP stream, fetches the HTTP stream output and, when a display is available,
+records the screen.
