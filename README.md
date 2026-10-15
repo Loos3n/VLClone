@@ -93,6 +93,50 @@ manager is needed for the translucent controls (every modern desktop has one).
   use the buttons on the start screen, `Ctrl+O` (file), `Ctrl+F` (folder),
   `Ctrl+N` (network stream). Folders are scanned recursively and sorted
   naturally (`ep2` before `ep10`).
+* **Open Media** (`⋯` → *Media*, or `Ctrl+Shift+O`) is VLC's Media menu in one
+  dialog with four tabs, each with *Play* and *Enqueue*:
+  * *File*: several files/folders at once, optionally with a subtitle file.
+  * *Disc* (`Ctrl+D`): DVD, Blu-ray (unencrypted) or audio CD from a drive,
+    a disc folder (`VIDEO_TS` / `BDMV`) or an ISO image. Optical drives are
+    detected (Windows: every CD/DVD/BD drive with its volume label; the drive
+    with a disc in it is preselected), and picking a folder or ISO detects
+    the disc type. *Disc menus* on/off, starting title and chapter, or the CD
+    track.
+  * *Network* (`Ctrl+N`): URL with completion from your recent URLs (right-click
+    to remove one, *Clear history*), a live hint of what VLC will do
+    (*HLS stream*, *RTSP*, *YouTube (via VLC's Lua script)*…) or why the URL
+    is wrong, and the network caching in ms. `www.…`, `youtu.be/…` and
+    `@:1234` (UDP) are completed for you.
+  * *Capture device* (`Ctrl+C`): webcam and microphone (DirectShow on
+    Windows, V4L2/ALSA on Linux) with resolution, frame rate and caching.
+  * Under every tab: *Start at* and *Extra options* (`:option=value`, as in
+    VLC's "Show more options").
+* **Streams that fail say why** instead of hanging: a toast names the host and
+  the likely cause with a *Retry* button (YouTube failures point at VLC's
+  `youtube.lua`, disc failures at encryption). Streams that never start give
+  up after 20 s (Settings → Playback). YouTube pages and remote `.m3u` lists
+  expand into their real entries in the playlist, as in VLC.
+* **Chapters and titles**: files with chapters (MKV, MP4, DVD, Blu-ray) show
+  them as gaps in the timeline; hovering shows the chapter name, and a
+  `Ch 2/12` chip opens Quick settings → *Chapters* (chapter list, titles,
+  disc-menu pad). `Shift+N` / `Shift+P` = next / previous chapter (previous
+  restarts the current chapter after 3 s), `Shift+B` / `Shift+O` = next /
+  previous title, `Shift+M` = disc menu. While a DVD menu is shown, the arrow
+  keys and `Enter` navigate it.
+* **Media library** (`Ctrl+Shift+L`, or *Library* on the start screen) takes the
+  video's place; the playlist stays beside it. Add *Video* and *Music*
+  folders (*Folders…*); they are scanned in the background, rescanned when
+  their contents change and at every launch (only new or changed files are
+  read again). Sections:
+  * *Videos*: thumbnail grid with duration and resolution; sort by title,
+    recently added, last played, duration, size or folder.
+  * *Music*: artist → album → tracks from the files' tags.
+  * *Recently played*: everything you played, including streams and discs.
+  * *Continue watching*: files with a saved resume position, with progress.
+
+  Search filters every section. Double-click plays (videos switch back to the
+  player, music keeps playing while you browse); right-click → *Add to
+  playlist* or *Show in folder*.
 * **Controls** appear when you move the mouse and fade out after ~2 s of
   playback. Hover the timeline to see the time under the cursor; drag to scrub.
   Scroll anywhere over the video to change volume (up to 200 %, the boost zone
@@ -129,6 +173,7 @@ manager is needed for the translucent controls (every modern desktop has one).
 * **Effect settings persist**, either one set for every file (default) or per
   file (Settings → Audio & video → *Effect settings apply to*). Per-file mode:
   each file remembers its own effects; new files start from the global set.
+  Rotation, aspect ratio, crop, zoom and deinterlace follow the same setting.
 * **Resume**: files continue where you stopped (with a *Start over* button).
 * **Playlist restore**: the playlist comes back on the next launch with the
   last item selected (Settings → Playback; turn off to start empty).
@@ -140,6 +185,17 @@ manager is needed for the translucent controls (every modern desktop has one).
 ![Quick settings](docs/quick-settings.png)
 
 ![Effects & filters: equalizer](docs/effects.png)
+
+![Media library: videos](docs/library-videos.png)
+
+![Chapters on the timeline and in Quick settings](docs/seek-chapters.jpg)
+
+<p>
+  <img src="docs/open-network.png" alt="Open Media: Network" width="420">
+  <img src="docs/open-disc.png" alt="Open Media: Disc" width="420">
+</p>
+
+![Media library: music](docs/library-music.png)
 
 ### Keyboard shortcuts (VLC defaults)
 
@@ -167,10 +223,15 @@ manager is needed for the translucent controls (every modern desktop has one).
 | Playlist / quick settings | `Ctrl+L` / `Ctrl+E` |
 | Effects & filters | `Ctrl+Shift+E` (not a VLC default; `Ctrl+E` is Quick settings) |
 | Rotate / flip horizontally / flip vertically | `Ctrl+Alt+R` / unbound / unbound (assign in Settings → Shortcuts) |
+| Next / previous chapter | `Shift+N` / `Shift+P` |
+| Next / previous title, disc menu | `Shift+B` / `Shift+O`, `Shift+M` |
+| Disc menu navigation | `↑` `↓` `←` `→` `Enter` (only while a menu is shown) |
+| Media library | `Ctrl+Shift+L` |
 | Media information | `Ctrl+I` (or `Ctrl+J`) |
 | Settings | `Ctrl+P` |
 | Save playlist | `Ctrl+Y` |
 | Open file / folder / stream | `Ctrl+O` / `Ctrl+F` / `Ctrl+N` |
+| Open disc / capture device / Open Media | `Ctrl+D` / `Ctrl+C` / `Ctrl+Shift+O` |
 | Quit | `Ctrl+Q` |
 
 ## Architecture
@@ -183,7 +244,13 @@ vlclone/
     fake_backend.py  deterministic in-memory backend for tests / UI work
     controller.py    PlayerController: all player behaviour + observer signals
     effects.py       effects model, EQ presets, transform composition, Debouncer,
-                     preset + per-file stores
+                     preset + per-file stores, persisted geometry
+    network.py       URL checks, protocol detection, recent-URL history, error text
+    discs.py         DVD / Blu-ray / CD MRLs, VIDEO_TS/BDMV/ISO detection, drives
+    capture.py       dshow / v4l2 / alsa MRLs, Linux device discovery
+    library.py       media library store (SQLite): folders, metadata, history
+    library_scanner.py  background scan, folder watching, thumbnails (LibraryService)
+    png.py           tiny PNG writer for thumbnails
     session.py       playlist persistence between sessions
     playlist.py      ordering, current item, repeat, shuffle
     abloop.py, stepping.py, timefmt.py, media_sources.py
@@ -191,8 +258,10 @@ vlclone/
   ui/              # PySide6 widgets, talk only to PlayerController
     main_window.py   window, sidebar, menus, wiring
     overlay.py       translucent always-on-top controls window over the video
-    quick_settings.py popover with pluggable pages
+    quick_settings.py popover with pluggable pages (… Video, Chapters)
     effects_panel.py  Effects & filters panel (equalizer, audio, image)
+    open_media.py    Open Media dialog (File, Disc, Network, Capture device)
+    library_view.py  media library view, folder manager
     playlist_panel.py, widgets.py, icons.py (vector, high-DPI), theme.py …
 ```
 
@@ -221,6 +290,29 @@ vlclone/
   libvlccore's exported variable API, as VLC's own UI does. That relies on the
   3.0.x plugin ABI, so it only enables itself on libVLC 3.0 and the toggle is
   disabled (with a tooltip) if the hook isn't available.
+* **Media sources are MRLs plus media options.** Every source ends up in
+  `PlayerController.open(inputs, options=…, title=…)`: discs are
+  `dvd:///D:/#title:chapter`, `dvdsimple://`, `bluray://` (+ `:no-bluray-menu`),
+  `cdda://` (+ `:cdda-track=N`); capture is `dshow://` + `:dshow-vdev=…`;
+  caching is `:network-caching=…`. Options live on the playlist item, so they
+  survive reloads, the session file and `.m3u` (`#EXTVLCOPT`, like VLC).
+* **Chapters/titles** are polled from the backend (once a second while
+  playing, and after title changes) and arrive as `chapters_changed`.
+  YouTube pages and remote playlists "end" in libVLC with sub-items; the
+  controller replaces the playlist entry with them (reusing the sub-item media,
+  so options set by VLC's Lua scripts are kept).
+* **DirectShow devices** are listed the way VLC's preferences do it: libvlccore's
+  `config_GetPszChoices("dshow-vdev")` runs the dshow module's own enumerator.
+* **Media library**: `LibraryService` runs one worker thread at a time (scan,
+  folder check, thumbnails) with its own libVLC instance (`VlcMediaProbe`).
+  Like the player, nothing calls back into Qt: the view polls `status` and a
+  `generation` counter twice a second. SQLite (WAL, one connection per thread)
+  lives in the data folder (`%LOCALAPPDATA%\VLClone\library.db` on Windows,
+  `~/.local/share/vlclone` on Linux) with thumbnails next to it. Metadata comes
+  from libVLC's local preparser; thumbnails decode one frame a third of the
+  way in through libVLC's `vmem` callbacks (no window needed) and are written
+  with a small PNG encoder. Folder changes are noticed by comparing directory
+  modification times every 30 s.
 
 ### Adding the later VLC features
 
@@ -241,13 +333,15 @@ The structure is meant to absorb VLC's bigger features without rewrites:
 | Video effects & filters | ✅ phase 2 (adjust live; transform/sharpen via `EngineFilters`) |
 | More VLC video filters (e.g. gradfun, posterize) | add a field to `VideoEffects` + `EngineFilters.vlc_args()`; they reuse the batched reload |
 | Convert / stream out | a `core/transcode.py` driving a second libVLC instance with `:sout=` options, a dialog |
-| DVD / Blu-ray / discs | `dvd://`, `bluray://` MRLs via `controller.open`; chapter/title APIs in the backend |
-| Media library | `core/library.py` (SQLite, folder watching) + a sidebar tab |
+| DVD / Blu-ray / discs, chapters | ✅ phase 3 (`discs.py`, chapter/title/navigate in the backend) |
+| Network streams, capture devices | ✅ phase 3 (`network.py`, `capture.py`, Open Media dialog) |
+| Media library | ✅ phase 3 (`library.py`, `library_scanner.py`, `library_view.py`) |
+| Playlists/podcasts/UPnP discovery | a backend `media_discoverer` wrapper + a library section |
 
 ## Status
 
-All eight core-player priorities (phase 1) and the effects work (phase 2) are
-implemented:
+All eight core-player priorities (phase 1), the effects work (phase 2) and
+media sources + library (phase 3) are implemented:
 
 | # | Feature | State |
 | --- | --- | --- |
@@ -264,6 +358,13 @@ implemented:
 | P2 | Image adjust: brightness, contrast, hue, saturation, gamma | ✅ live |
 | P2 | Flip horizontal/vertical, sharpen with strength | ✅ batched reload |
 | P2 | Effects persisted globally or per file; playlist restored on launch | ✅ |
+| P3 | Open Media dialog: File, Disc, Network, Capture device | ✅ |
+| P3 | Network: HTTP(S), HLS, RTSP, RTMP, UDP/RTP, YouTube (Lua), history, caching, clear errors + timeout | ✅ (HTTP/HLS/errors tested with real libVLC) |
+| P3 | DVD (menus, titles, chapters), Blu-ray (unencrypted), audio CD; drive detection; folder/ISO | ✅ (needs a Windows test with real discs) |
+| P3 | Chapter list, next/previous chapter, chapter marks on the seek bar | ✅ (MKV/MP4 tested with real libVLC) |
+| P3 | Webcam / microphone via DirectShow, resolution and frame rate | ✅ (needs a Windows test with a camera) |
+| P3 | Media library: watched folders, background scan, SQLite, metadata, thumbnails, four views, search/sort | ✅ |
+| P3 | Rotation, aspect, crop, zoom, deinterlace persisted with the effects scope | ✅ |
 
 Known limitations / not yet done:
 
@@ -271,8 +372,6 @@ Known limitations / not yet done:
   filters per instance); position, pause state, tracks, external subtitles,
   delays and live effects are restored, but there is a brief flash. Live
   streams restart from the live edge.
-* Only the effects themselves persist; geometry (rotation, aspect, crop, zoom,
-  deinterlace) is still per session, as in phase 1.
 * Turning image adjust on or off (moving away from / back to all-neutral
   values) rebuilds libVLC's video filter chain once, which can show a single
   dropped frame; moving sliders after that is smooth.
@@ -281,9 +380,28 @@ Known limitations / not yet done:
 * Development and screenshots were done on Linux (X11 + compositor, real
   libVLC 3.0.20). The Windows path (HWND embedding, `libvlc.dll` discovery)
   follows libVLC's documented API but should be smoke-tested on a Windows box.
-* Later phases from the roadmap above: convert/stream, discs/DVD menus, media
-  library; more of VLC's effect filters (compressor, spatializer, color
-  threshold, …) can follow the same pattern.
+* DVD menus are driven with the keyboard (arrows, `Enter`) or the pad in
+  Quick settings → Chapters; clicking menu buttons with the mouse is not
+  supported, because the controls overlay sits above libVLC's video window.
+* Blu-ray: only unencrypted discs (VLC ships no AACS/BD+ keys); interactive
+  BD-J menus need Java, which the bundled VLC lacks, so turn *Disc menus*
+  off if a disc shows nothing.
+* YouTube relies on the `youtube.lua` that ships with VLC 3.0.21. YouTube
+  changes often and that script is frequently out of date; when a link fails
+  the error says so. Replacing `vlc\lua\playlist\youtube.luac` with a newer
+  `youtube.lua` from VideoLAN fixes it without rebuilding.
+* Capture resolutions are requested, not negotiated: DirectShow does not
+  report the list of formats through libVLC, so the dialog offers common
+  sizes and the camera falls back to its default if one is unsupported.
+* The library only reads local metadata (tags, stream info); it does not
+  download cover art or look things up online. Music without tags is grouped
+  under "Unknown artist", with the folder as album only when libVLC is not
+  available.
+* Folder watching compares directory times every 30 s rather than using OS
+  change notifications; renaming a file inside an existing folder is picked
+  up on that check, edits to a file's tags on the next launch or *Rescan*.
+* Later phases from the roadmap: convert/stream (sout), network discovery
+  (UPnP/SMB), more of VLC's effect filters.
 
 ## Development
 
@@ -293,5 +411,15 @@ python -m pytest            # core + offscreen UI tests
 python run.py --fake-backend   # UI without libVLC
 ```
 
-`tests/test_vlc_backend.py` runs against a real libVLC when one is installed
-(it generates a short clip with `ffmpeg`) and is skipped otherwise.
+`tests/test_vlc_backend.py` and `tests/test_vlc_phase3.py` run against a real
+libVLC when one is installed and are skipped otherwise. They serve files and an
+HLS stream from a local HTTP server, check 404 and refused connections, read
+chapters, tags and sizes, make thumbnails and scan a library with the real
+probe; clips come from `ffmpeg` when present, and `vlclone/selftest_media.py`
+writes a chaptered Matroska file and a Y4M video in pure Python otherwise.
+
+`VLClone.exe --self-test report.txt` (run by the Windows build) plays a tone
+through a filtered instance, applies the effects, reads chapters from a
+generated MKV and jumps between them, plays a local HTTP stream, checks that a
+404 fails, makes a library thumbnail and lists capture devices and optical
+drives.
