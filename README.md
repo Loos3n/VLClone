@@ -6,6 +6,8 @@ codecs, formats, streaming protocols and subtitles are handled by libVLC (via
 VLC exactly. Only the interface is new: a dark, minimal UI where the video
 fills the window and the controls fade away while you watch.
 
+![Playback with controls revealed](docs/screenshot.png)
+
 > VLClone is an independent frontend. It does not fork, modify or reverse
 > engineer VLC; it uses the public libVLC API of an installed VLC.
 
@@ -64,6 +66,19 @@ manager is needed for the translucent controls (every modern desktop has one).
 * **Playlist** is a sidebar (`Ctrl+L`): drag rows to reorder, drop files onto it
   to insert at a position, `Delete` removes, `Enter`/double-click plays,
   type in *Filter…* to search.
+
+* **Tracks, subtitles and video**: the quick-settings popover also has
+  *Audio* (track, delay), *Subtitles* (track, load `.srt`/`.ass`/…, delay) and
+  *Video* (aspect ratio, crop, zoom, rotate, deinterlace, snapshot) pages. The
+  same options are in the `⋯` menu / right-click menu. Dropping a subtitle file
+  on a playing video loads it.
+* **Resume**: files continue where you stopped (with a *Start over* button).
+* **Media information** (`Ctrl+I`) shows metadata, codecs, resolution, frame
+  rate, audio format and live bitrate/frame statistics.
+* **Settings** (`Ctrl+P`) is one short page: playback, audio & video, interface,
+  shortcut editor.
+
+![Quick settings](docs/quick-settings.png)
 
 ### Keyboard shortcuts (VLC defaults)
 
@@ -146,6 +161,35 @@ The structure is meant to absorb VLC's bigger features without rewrites:
 | Convert / stream out | a `core/transcode.py` driving a second libVLC instance with `:sout=` options, a dialog |
 | DVD / Blu-ray / discs | `dvd://`, `bluray://` MRLs via `controller.open`; chapter/title APIs in the backend |
 | Media library | `core/library.py` (SQLite, folder watching) + a sidebar tab |
+
+## Status
+
+All eight core-player priorities are implemented:
+
+| # | Feature | State |
+| --- | --- | --- |
+| 1 | Open files, folders (recursive), URLs/network streams, `.m3u`, drag-and-drop | ✅ |
+| 2 | Play/pause, stop, seek bar with hover time, frame step, volume to 200 %, mute, fullscreen | ✅ |
+| 3 | Speed (presets + fine slider), A-B loop, repeat off/all/one, shuffle | ✅ |
+| 4 | Embedded + external subtitles, subtitle delay, audio track, audio delay | ✅ |
+| 5 | Aspect ratio, crop, zoom, rotate, deinterlace, snapshot | ✅ |
+| 6 | Playlist reorder, save/load `.m3u`, per-file resume | ✅ |
+| 7 | Media info (codec, resolution, bitrate, statistics) | ✅ |
+| 8 | VLC default shortcuts, editable | ✅ |
+
+Known limitations / not yet done:
+
+* Rotation reloads the media (libVLC only applies video filters per
+  instance); position, pause state, tracks, external subtitles and delays are
+  restored, but there is a brief flash.
+* Seek preview shows the time under the cursor, not a thumbnail.
+* The playlist is not persisted between sessions (save it as `.m3u`).
+* No single-instance mode / "open with" handoff to an existing window yet.
+* Development and screenshots were done on Linux (X11 + compositor, real
+  libVLC 3.0.20). The Windows path (HWND embedding, `libvlc.dll` discovery)
+  follows libVLC's documented API but should be smoke-tested on a Windows box.
+* Later phases from the roadmap above: equalizer, effects/filters, convert/
+  stream, discs/DVD menus, media library.
 
 ## Development
 

@@ -99,3 +99,39 @@ def test_rotation_swaps_instance_and_plays(backend, sample):
     backend.play()
     assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
     assert backend._player_rotation == 0
+
+
+def test_controller_auto_advances_and_plays_http(backend, sample, tmp_path):
+    """End-to-end through PlayerController: file end -> next item (an HTTP stream)."""
+    import functools
+    import http.server
+    import threading
+
+    from vlclone.core.controller import PlayerController
+    from vlclone.core.settings import Settings
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(sample.parent))
+    handler.log_message = lambda *a, **k: None
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/{sample.name}"
+        ctl = PlayerController(backend, Settings(resume_playback=False))
+        ctl.open([str(sample), url])
+
+        def tick_until(cond, timeout=15.0):
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                ctl.tick()
+                if cond():
+                    return True
+                time.sleep(0.05)
+            return False
+
+        assert tick_until(lambda: ctl.state is PlaybackState.PLAYING)
+        ctl.seek(ctl.length() - 700)
+        assert tick_until(lambda: ctl.playlist.current_index == 1)
+        assert tick_until(lambda: ctl.state is PlaybackState.PLAYING and ctl.time() > 0)
+        assert ctl.backend.media_info().mrl == url
+    finally:
+        server.shutdown()
