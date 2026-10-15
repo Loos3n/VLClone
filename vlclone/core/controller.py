@@ -1052,10 +1052,13 @@ class PlayerController:
 
         Mirrors VLC's playlist, where such an entry expands into its children.
         """
-        subitems = self.backend.subitems()
         index = self.playlist.current_index
         item = self.playlist.current
-        if not subitems or item is None:
+        if item is None:
+            return False
+        # A playlist that lists itself would expand forever.
+        subitems = [(mrl, title) for mrl, title in self.backend.subitems() if mrl != item.mrl]
+        if not subitems:
             return False
         new = [PlaylistItem(mrl, title.strip(), options=list(item.options)) for mrl, title in subitems]
         if len(new) == 1 and (not subitems[0][1].strip() or "://" in subitems[0][1]):
@@ -1114,6 +1117,13 @@ class PlayerController:
             self.resume.update(item.mrl, self.backend.time(), self.backend.length())
         if save:
             self._save_resume()
+
+    def resume_entries(self) -> dict[str, tuple[int, int, float]]:
+        """Saved resume positions (including the file playing now), for "Continue watching"."""
+        if self.resume is None:
+            return {}
+        self._remember_position(save=False)
+        return self.resume.entries()
 
     def _save_resume(self) -> None:
         self._last_resume_save = _time.monotonic()

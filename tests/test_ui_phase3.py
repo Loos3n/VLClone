@@ -379,6 +379,24 @@ def test_library_empty_state_and_folders_dialog(window, app, library, media_dir)
     dlg.close()
 
 
+def test_settings_page_has_network_and_library_options(window, app):
+    from vlclone.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(window.settings, window.apply_settings, window)
+    fields = {field for field, _, _ in dlg._bindings}
+    assert {"network_caching_ms", "network_timeout_s", "library_watch", "library_thumbnails"} <= fields
+    setter = next(set_ for field, _, set_ in dlg._bindings if field == "library_thumbnails")
+    setter(False)
+    dlg.accept()
+    assert window.settings.library_thumbnails is False and window.library.thumbnails is False
+
+
+def test_library_notify_message(window, app):
+    view = window.library_view
+    window._open_from_library(["http://x/a.mp4", "http://x/b.mp4"], False)
+    assert view.message.text() == "Added 2 items to the playlist"
+
+
 def test_play_history_recorded_for_streams(window, library):
     window.ctl.open(["https://example.com/live.m3u8"])
     window._tick()

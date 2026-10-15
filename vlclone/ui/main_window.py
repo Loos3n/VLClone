@@ -409,8 +409,7 @@ class MainWindow(QMainWindow):
     def _open_from_library(self, mrls: list[str], play: bool) -> None:
         added = self.ctl.open(mrls, play=play)
         if not play:
-            self.library_view.status.setText(f"Added {added} item{'s' if added != 1 else ''} to the playlist")
-            self.library_view.status.show()
+            self.library_view.notify(f"Added {added} item{'s' if added != 1 else ''} to the playlist")
         elif any(self._is_video_mrl(m) for m in mrls):
             self.show_player()  # music keeps playing while you browse
 
@@ -419,10 +418,7 @@ class MainWindow(QMainWindow):
         return item.kind == "video" if item else True
 
     def _resume_entries(self) -> dict:
-        if self.ctl.resume is None:
-            return {}
-        self.ctl._remember_position(save=False)  # include the file playing right now
-        return self.ctl.resume.entries()
+        return self.ctl.resume_entries()
 
     # =============================================================== sidebar
     def toggle_playlist(self) -> None:
@@ -829,6 +825,8 @@ class MainWindow(QMainWindow):
         self.actions.get("always_on_top").setChecked(s.always_on_top)
         if self.ctl.resume:
             self.ctl.resume.min_position_ms = s.resume_min_seconds * 1000
+        self.library.watch = s.library_watch
+        self.library.thumbnails = s.library_thumbnails
         if s.effects_scope != self._effects_scope:
             new_scope, s.effects_scope = s.effects_scope, self._effects_scope
             self.ctl.set_effects_scope(new_scope)

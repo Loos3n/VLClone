@@ -135,6 +135,25 @@ def test_remote_playlist_expands_in_place(ctl):
     assert ctl.playlist.current_index == 1
 
 
+def test_self_referencing_playlist_does_not_loop(ctl):
+    b = ctl.backend
+    b.subitem_map["http://x/loop.m3u"] = [("http://x/loop.m3u", "again")]
+    start(ctl, "http://x/loop.m3u")
+    ctl.tick()
+    assert len(ctl.playlist) == 1 and ctl.state is PlaybackState.STOPPED
+
+
+def test_resume_entries_include_the_playing_file(tmp_path):
+    from vlclone.core.resume import ResumeStore
+
+    ctl = PlayerController(FakeBackend(), Settings(), ResumeStore(tmp_path / "r.json", 1000))
+    assert PlayerController(FakeBackend(), Settings()).resume_entries() == {}
+    start(ctl, "file:///film.mkv")
+    ctl.backend.advance(20_000)
+    entries = ctl.resume_entries()
+    assert entries["file:///film.mkv"][0] == 20_000
+
+
 def test_failed_stream_reports_a_clear_error(ctl):
     errors, failed = [], []
     ctl.error.connect(errors.append)

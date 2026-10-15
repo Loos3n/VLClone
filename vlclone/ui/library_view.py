@@ -428,6 +428,11 @@ class LibraryView(QWidget):
         header.addWidget(self.title)
         header.addWidget(self.count)
         header.addStretch(1)
+        self.message = QLabel()
+        self.message.setObjectName("Muted")
+        self._message_timer = QTimer(self, singleShot=True, interval=3500)
+        self._message_timer.timeout.connect(self.message.clear)
+        header.addWidget(self.message)
         self.search = FilterEdit()
         self.search.setPlaceholderText("Search…")
         self.search.setClearButtonEnabled(True)
@@ -558,6 +563,11 @@ class LibraryView(QWidget):
             self._generation = gen
             self.reload()
 
+    def notify(self, text: str) -> None:
+        """A short message in the header (e.g. "Added 3 items to the playlist")."""
+        self.message.setText(text)
+        self._message_timer.start()
+
     def set_now_playing(self, title: str, playing: bool) -> None:
         self.now_playing.setVisible(bool(title))
         self.np_label.setText(f"Now playing: {title}" if title else "")
@@ -577,6 +587,13 @@ class LibraryView(QWidget):
 
     # ----------------------------------------------------------- loading
     def reload(self) -> None:
+        # Keep the scroll position: the scanner refreshes the view while it works.
+        bars = [(v.verticalScrollBar(), v.verticalScrollBar().value()) for v in (self.grid, self.list, self.music)]
+        self._reload()
+        for bar, value in bars:
+            bar.setValue(value)
+
+    def _reload(self) -> None:
         search = self.search.text().strip()
         key = self.section
         counts = self.service.db.counts()
@@ -714,8 +731,7 @@ class LibraryView(QWidget):
         if folder:
             error = self.service.add_folder(folder, kind)
             if error:
-                self.status.setText(error)
-                self.status.show()
+                self.notify(error)
 
     def manage_folders(self) -> None:
         LibraryFoldersDialog(self.service, self.settings, self).exec()

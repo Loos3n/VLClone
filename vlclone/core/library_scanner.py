@@ -233,7 +233,7 @@ class LibraryService:
             job, self._pending = self._pending, None
             self._start(job)
             return
-        if self.watch and self.db.folders() and self.clock() - self._last_check >= self.watch_interval_s:
+        if self.watch and self.clock() - self._last_check >= self.watch_interval_s and self.db.folders():
             self._last_check = self.clock()
             self._start("check")
 
