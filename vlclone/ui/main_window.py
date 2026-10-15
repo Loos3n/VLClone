@@ -118,6 +118,9 @@ class MainWindow(QMainWindow):
             lambda rows: self.open_convert_dialog([self._source_for(self.ctl.playlist[r]) for r in rows
                                                    if 0 <= r < len(self.ctl.playlist)]))
         self.content.addWidget(self.library_view)
+        # An explicit minimum: the library's toolbar would otherwise keep the whole window at least
+        # ~1000 px wide (and the mini player could never get small).
+        self.content.setMinimumSize(320, 180)
         self.splitter.addWidget(self.content)
         self.splitter.addWidget(self.sidebar)
         self.splitter.setStretchFactor(0, 1)
@@ -409,6 +412,10 @@ class MainWindow(QMainWindow):
         return QRect(self.video.mapToGlobal(QPoint(0, 0)), self.video.size())
 
     def _sync_overlay(self) -> None:
+        if not self.sidebar.isVisible() and self.content.geometry() != self.splitter.rect():
+            # On X11 the re-map after a window-flag change (mini player) can deliver the old size
+            # late; QSplitter then keeps the video at that size although its own sizes look right.
+            self.splitter.setSizes([self.splitter.width(), 0])
         # The overlay is a separate always-above window; keep it out of the
         # way while a modal dialog (file picker, settings…) is up.
         modal = QApplication.activeModalWidget()
@@ -1195,7 +1202,7 @@ class MainWindow(QMainWindow):
                 self.showNormal()
             self._set_flags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint, True)
             r = plan_mini(self.settings.window_state.get("mini"), self._screens())
-            self.setGeometry(r.x, r.y, r.w, r.h)
+            self._apply_geometry(QRect(r.x, r.y, r.w, r.h))
         else:
             self._remember_mini_rect()
             self.mini_mode = False
@@ -1206,7 +1213,7 @@ class MainWindow(QMainWindow):
             self.setMinimumSize(640, 400)
             before = self._before_mini
             if before.get("geometry") is not None:
-                self.setGeometry(before["geometry"])
+                self._apply_geometry(before["geometry"])
             if before.get("maximized"):
                 self.showMaximized()
             if before.get("sidebar", self.settings.playlist_visible):
@@ -1218,6 +1225,11 @@ class MainWindow(QMainWindow):
         self.overlay.show_welcome(not self.ctl.has_media)
         if self.ctl.has_media:
             self._update_media_kind()
+        QTimer.singleShot(0, self._sync_overlay)
+
+    def _apply_geometry(self, rect: QRect) -> None:
+        """Set the geometry; _sync_overlay repairs the splitter if a late re-map left it stale."""
+        self.setGeometry(rect)
         QTimer.singleShot(0, self._sync_overlay)
 
     def _remember_mini_rect(self) -> None:

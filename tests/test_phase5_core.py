@@ -487,3 +487,70 @@ def test_logs_rotate(tmp_path):
         diagnostics.log.removeHandler(h)
         h.close()
     assert path.exists()
+
+
+# ------------------------------------------------------------------ release tooling
+def test_release_notes_from_commits_since_last_tag(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "packaging"))
+    import release_notes
+
+    def run(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    run("init", "-q")
+    run("config", "user.email", "t@example.com")
+    run("config", "user.name", "t")
+    for i, tag in ((1, "v0.9.0"), (2, "build-3"), (3, None), (4, "v1.0.0")):
+        (tmp_path / "f.txt").write_text(str(i))
+        run("add", "f.txt")
+        run("commit", "-q", "-m", f"Change {i}")
+        if tag:
+            run("tag", tag)
+    monkeypatch.chdir(tmp_path)
+    since = release_notes.previous_tag("v1.0.0")
+    assert since == "v0.9.0"  # build-N pre-release tags are not releases
+    items = release_notes.commits("v1.0.0", since)
+    assert [s for _, s in items] == ["Change 4", "Change 3", "Change 2"]
+    notes = release_notes.render("v1.0.0", since, items)
+    assert notes.startswith("## VLClone 1.0.0") and "- Change 3 (" in notes and "Change 1" not in notes
+    assert "VLClone-1.0.0-Setup.exe" in notes and "compare/v0.9.0...v1.0.0" in notes
+    assert release_notes.previous_tag("v0.9.0") is None
+
+
+def test_version_is_single_sourced():
+    import re
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from vlclone import __version__
+
+    root = Path(__file__).resolve().parents[1]
+    printed = subprocess.run([sys.executable, str(root / "packaging" / "make_version_info.py"), "--print"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    assert printed == __version__
+    assert "AppVersion" in (root / "packaging" / "installer.iss").read_text()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+
+
+def test_installer_associations_are_generated(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    out = tmp_path / "assoc.iss"
+    subprocess.run([sys.executable, str(root / "packaging" / "make_associations.py"), str(out)], check=True,
+                   capture_output=True)
+    text = out.read_text()
+    reg = [l for l in text.splitlines() if l.startswith("Root: HKA")]
+    assert all("Tasks: " in l for l in reg)  # every entry is opt-in
+    assert all("uninsdelete" in l or "Check: NoDefaultFor" in l for l in reg)  # and removed on uninstall
+    assert 'Subkey: "Software\\Classes\\.mkv"; ValueType: string; ValueData: "VLClone.Video"' in text
+    assert "RemoveDefaultIfOurs('.mkv', 'VLClone.Video');" in text
+    assert '""{app}\\VLClone.exe"" --play ""%1""' in text

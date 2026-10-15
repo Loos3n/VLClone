@@ -299,11 +299,11 @@ QPushButton#ListRow:disabled {{ color: {TEXT_FAINT}; }}
 QPushButton#Swatch {{ border-radius: 13px; min-width: 26px; max-width: 26px; min-height: 26px;
     max-height: 26px; padding: 0; border: 2px solid transparent; }}
 QPushButton#Swatch:checked {{ border: 2px solid {TEXT}; }}
-QPushButton#ThemeCard {{
-    background: {SURFACE_2}; border: 2px solid {BORDER}; border-radius: 12px; padding: 10px;
-    text-align: center;
+QToolButton#ThemeCard {{
+    background: {SURFACE_2}; border: 2px solid {BORDER}; border-radius: 12px; padding: 8px 6px 6px 6px;
 }}
-QPushButton#ThemeCard:checked {{ border: 2px solid {ACCENT}; background: {ACCENT_SOFT}; }}
+QToolButton#ThemeCard:hover {{ border: 2px solid {TEXT_FAINT}; }}
+QToolButton#ThemeCard:checked {{ border: 2px solid {ACCENT}; background: {ACCENT_SOFT}; }}
 
 /* Inputs */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {{
@@ -323,7 +323,7 @@ QComboBox QAbstractItemView {{
     selection-color: {TEXT};
     padding: 4px;
 }}
-QSpinBox::up-button, QSpinBox::down-button {{ width: 0px; border: none; }}
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0px; border: none; }}
 QCheckBox, QRadioButton {{ spacing: 10px; }}
 QCheckBox::indicator {{
     width: 16px; height: 16px; border-radius: 4px;
@@ -561,9 +561,19 @@ def set_error(widget, on: bool = True) -> None:
         widget.style().polish(widget)
 
 
+class _ShadowFollower(QObject):
+    """Owned by the shadow effect, so its connection ends when the effect is deleted."""
+
+    def __init__(self, effect) -> None:
+        super().__init__(effect)
+        self.effect = effect
+        self.apply()
+        notifier().changed.connect(self.apply)
+
+    def apply(self) -> None:
+        self.effect.setColor(QColor(0, 0, 0, 150 if MODE == "dark" else 70))
+
+
 def popover_shadow(effect) -> None:
     """Theme a popover's drop shadow now and on every theme switch."""
-    def apply() -> None:
-        effect.setColor(QColor(0, 0, 0, 150 if MODE == "dark" else 70))
-    apply()
-    notifier().changed.connect(apply)
+    _ShadowFollower(effect)

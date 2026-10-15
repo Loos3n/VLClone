@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 
 from .. import APP_NAME
 from ..core.associations import CATEGORY_LABELS
@@ -63,14 +63,16 @@ class ThemePicker(QWidget):
         cards = QHBoxLayout()
         cards.setSpacing(10)
         self.cards = QButtonGroup(self)
-        self.card_buttons: dict[str, QPushButton] = {}
+        self.card_buttons: dict[str, QToolButton] = {}
         for key, label in self.MODES:
-            b = QPushButton(label)
+            b = QToolButton()
+            b.setText(label)
+            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             b.setObjectName("ThemeCard")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
             b.setIconSize(QSize(120, 72))
-            b.setMinimumHeight(118)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setChecked(key == mode)
             b.clicked.connect(lambda _=False, k=key: self._pick_mode(k))
             self.cards.addButton(b)

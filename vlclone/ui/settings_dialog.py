@@ -291,6 +291,7 @@ class SettingsDialog(BaseDialog):
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
                 scroll.setFrameShape(QFrame.NoFrame)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 scroll.setWidget(widget)
                 widget = scroll
             self.stack.addWidget(widget)

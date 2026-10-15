@@ -19,6 +19,40 @@ permissions:
   contents: write
 
 jobs:
+  # Every theme and the mini player rendered on a virtual X display (Xvfb), checked pixel by
+  # pixel; the PNGs are kept for 3 days so a reviewer can look at them.
+  ui-screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Qt's X11 libraries and Python dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-image0 \
+            libdbus-1-3 libfontconfig1
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Screenshot check (Xvfb)
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" env QT_QPA_PLATFORM=xcb VLCLONE_SCREENSHOT_DIR=shots \
+            python -m pytest -q tests/test_screenshots.py tests/test_ui_theme.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: ui-screenshots
+          path: shots/*.png
+          if-no-files-found: ignore
+          retention-days: 3
+
   build:
     runs-on: windows-latest
     env:
@@ -26,6 +60,8 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # release notes need the previous tag
 
       - uses: actions/setup-python@v5
         with:
@@ -36,6 +72,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt pyinstaller pillow
+
+      - name: Version (single source: vlclone/__init__.py)
+        id: meta
+        run: |
+          $version = python packaging/make_version_info.py --print
+          "version=$version" >> $env:GITHUB_OUTPUT
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $tag = "${{ github.ref_name }}".Substring(1)
+            if ($tag -ne $version) {
+              Write-Output "::error::Tag v$tag does not match __version__ = $version in vlclone/__init__.py"
+              exit 1
+            }
+          }
 
       - name: Unit tests
         run: python -m pytest -q --ignore=tests/test_vlc_backend.py
@@ -52,12 +101,11 @@ jobs:
       - name: Build plugin cache
         run: build\vlc\vlc-cache-gen.exe build\vlc\plugins
 
-      - name: Icon and version resource
-        id: meta
+      - name: Icon, version resource, file associations
         run: |
           python packaging/make_icon.py build/vlclone.ico
           python packaging/make_version_info.py
-          "version=$(python packaging/make_version_info.py --print)" >> $env:GITHUB_OUTPUT
+          python packaging/make_associations.py
 
       - name: PyInstaller
         run: pyinstaller packaging/vlclone.spec --noconfirm --distpath dist --workpath build/pyinstaller
@@ -78,6 +126,11 @@ jobs:
           if ($report -notmatch "convert mp3: ok .*MPEG layer 3") { Write-Output "::warning::MP3 conversion failed in the packaged build" }
           if ($report -notmatch "partial files left: 0") { Write-Output "::warning::A conversion left a partial file behind" }
           if ($report -notmatch "http stream out: ok") { Write-Output "::warning::HTTP streaming did not serve MPEG-TS in the packaged build" }
+          if ($report -notmatch "single instance handoff: ok") { Write-Output "::error::Single-instance handoff to the running exe failed"; exit 1 }
+          if ($report -notmatch "update check \(mocked\): ok") { Write-Output "::error::Update check against a mocked GitHub API failed"; exit 1 }
+          if ($report -notmatch "media overlay: ok") { Write-Output "::warning::Windows media overlay (SMTC / pywinrt) unavailable in the packaged build" }
+          if ($report -notmatch "taskbar: ok") { Write-Output "::warning::ITaskbarList3 could not be created" }
+          if ($report -notmatch "keep awake: request True, release True") { Write-Output "::warning::SetThreadExecutionState failed" }
           foreach ($line in (Get-Content selftest.txt | Select-String "^presets ")) { Write-Output "::notice::$line" }
 
       - name: Installer
@@ -91,9 +144,12 @@ jobs:
       - name: Portable zip
         run: Compress-Archive -Path dist\VLClone -DestinationPath "dist\VLClone-${{ steps.meta.outputs.version }}-win64-portable.zip"
 
+      # Branch builds keep their files for 3 days only (Actions storage quota); tag builds
+      # publish them as a release instead and upload no artifact at all.
       - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         # A full artifact quota should not hide a good build; the step shows
-        # as a warning and the release step below is the alternative.
+        # as a warning and the manual pre-release below is the alternative.
         continue-on-error: true
         with:
           name: VLClone-${{ steps.meta.outputs.version }}-windows
@@ -101,13 +157,20 @@ jobs:
             dist/VLClone-*-Setup.exe
             dist/VLClone-*-portable.zip
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
           compression-level: 0  # installer and zip are already compressed
+
+      - name: Release notes (commits since the previous v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python packaging/release_notes.py "${{ github.ref_name }}" > dist/release-notes.md
 
       - name: GitHub release (v* tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: VLClone ${{ steps.meta.outputs.version }}
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
           files: |
             dist/VLClone-*-Setup.exe
             dist/VLClone-*-portable.zip

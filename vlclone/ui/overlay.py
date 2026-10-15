@@ -305,7 +305,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setStyleSheet(theme.overlay_style_sheet())
-        theme.notifier().changed.connect(lambda: self.setStyleSheet(theme.overlay_style_sheet()))
+        theme.notifier().changed.connect(self._restyle)  # a bound slot: disconnected when deleted
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.trigger = trigger
@@ -319,6 +319,7 @@ class OverlayWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)  # it tracks the video, whatever size
 
         self.top_bar = QWidget()
         top = QHBoxLayout(self.top_bar)
@@ -346,7 +347,8 @@ class OverlayWindow(QWidget):
         root.addWidget(self.top_bar)
 
         self.center = QStackedWidget()
-        self.center.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Ignored: the hidden welcome card must not keep the overlay (and so the mini player) large.
+        self.center.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.empty_page = QWidget()
         self.empty_page.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.welcome = WelcomeCard(trigger)
@@ -387,6 +389,9 @@ class OverlayWindow(QWidget):
         self._click_timer = QTimer(self, singleShot=True)
         self._click_timer.timeout.connect(self.clicked.emit)
         self.show_welcome(True)
+
+    def _restyle(self) -> None:
+        self.setStyleSheet(theme.overlay_style_sheet())
 
     # ------------------------------------------------------------ visibility
     def pin(self, reason: str, on: bool) -> None:
@@ -492,6 +497,7 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_title(self, title: str, subtitle: str = "") -> None:
+        self._full_title = (title, subtitle)  # re-elided when the overlay resizes
         fm = self.title.fontMetrics()
         room = self.width() - (140 if self.compact else 300)
         self.title.setText(fm.elidedText(title, Qt.ElideMiddle, max(120 if self.compact else 200, room)))
@@ -574,6 +580,8 @@ class OverlayWindow(QWidget):
     # ---------------------------------------------------------------- layout
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
+        if getattr(self, "_full_title", None):
+            self.set_title(*self._full_title)
         self._place_floating()
 
     def _place_floating(self) -> None:

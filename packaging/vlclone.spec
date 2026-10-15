@@ -14,12 +14,23 @@ datas = [
     if p.is_file() and p.name != "vlc-cache-gen.exe"
 ]
 
+# pywinrt (media overlay / media keys) loads its projection modules dynamically.
+hiddenimports = []
+try:
+    from PyInstaller.utils.hooks import collect_submodules
+
+    hiddenimports = collect_submodules("winrt")
+except Exception:
+    pass
+
 a = Analysis(
     [str(ROOT / "run.py")],
     pathex=[str(ROOT)],
     datas=datas,
-    excludes=["tkinter", "unittest", "pytest", "PySide6.QtNetwork", "PySide6.QtQml",
-              "PySide6.QtQuick", "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.Qt3DCore"],
+    hiddenimports=hiddenimports,
+    # QtNetwork stays: single-instance mode uses QLocalServer / QLocalSocket.
+    excludes=["tkinter", "unittest", "pytest", "PySide6.QtQml", "PySide6.QtQuick",
+              "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.Qt3DCore", "PySide6.QtDBus"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

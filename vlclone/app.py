@@ -65,6 +65,7 @@ def self_test(report: str) -> int:
             backend.set_engine_filters(EngineFilters())
             lines.extend(_self_test_phase3(backend, tmp, tone))
             lines.extend(_self_test_phase4(tmp))
+            lines.extend(_self_test_phase5(tmp))
         backend.release()
     except Exception as exc:  # report anything: this runs without a console
         lines.append(f"fail {type(exc).__name__}: {exc}")
@@ -281,6 +282,132 @@ def _self_test_phase4(tmp: str) -> list[str]:
         lines.append(f"converter: fail {type(exc).__name__}: {exc}")
     finally:
         engine.release()
+    return lines
+
+
+def _self_test_phase5(tmp: str) -> list[str]:
+    """Single-instance handoff to a second real process, a mocked update check, and the
+    Windows integration pieces (media overlay, taskbar COM, keep-awake, file types)."""
+    import functools
+    import http.server
+    import json
+    import subprocess
+    import threading
+    import time
+    from pathlib import Path
+
+    lines: list[str] = []
+
+    def step(name, fn) -> None:
+        try:
+            lines.append(f"{name}: {fn()}")
+        except Exception as exc:  # one failing check must not hide the others
+            lines.append(f"{name}: fail {type(exc).__name__}: {exc}")
+
+    def handoff() -> str:
+        from PySide6.QtCore import QCoreApplication
+
+        from .core.instance import server_name
+        from .ui.instance import InstanceGuard
+
+        app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        cfg = Path(tmp) / "instance-config"
+        cfg.mkdir(exist_ok=True)
+        guard = InstanceGuard(server_name(str(cfg)), cfg / "instance.lock")
+        if not guard.acquire() or not guard.primary:
+            return "fail (could not become the first instance)"
+        got = []
+        guard.received.connect(got.append)
+        media = str(Path(tmp) / "handoff clip.mkv")
+        cmd = [sys.executable] + ([] if getattr(sys, "frozen", False) else ["-m", "vlclone"])
+        env = {**os.environ, "VLCLONE_CONFIG_DIR": str(cfg)}
+        child = subprocess.Popen(cmd + ["--enqueue", media], env=env)
+        end = time.monotonic() + 30
+        while not got and time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.02)
+        try:
+            code = child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            code = "hung"
+        guard.close()
+        if not got:
+            return f"fail (nothing received; second process exit {code})"
+        msg = got[0]
+        ok = msg.inputs == [media] and msg.mode == "enqueue" and code == 0
+        return f"{'ok' if ok else 'fail'} ({len(msg.inputs)} input, mode {msg.mode}, second process exit {code})"
+
+    def update_check() -> str:
+        from .core.updates import check_for_update
+
+        body = json.dumps({"tag_name": "v99.0.0", "html_url": "https://example.invalid/r", "draft": False,
+                           "prerelease": False}).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/repos/x/releases/latest"
+            newer = check_for_update("1.0.0", url=url)
+            same = check_for_update("99.0.0", url=url)
+        finally:
+            server.shutdown()
+        if newer.release and newer.release.version == "99.0.0" and same.checked and same.release is None:
+            return "ok (99.0.0 offered, not offered when current)"
+        return f"fail ({newer.error or newer.release} / {same.error or same.release})"
+
+    def media_overlay() -> str:
+        if sys.platform != "win32":
+            return "skipped (not Windows)"
+        from .core.desktop import SessionState
+        from .integration.win_media import create_media_overlay
+
+        overlay = create_media_overlay()
+        if overlay is None:
+            return "unavailable (see log)"
+        overlay.update(SessionState("playing", "Self-test", "VLClone", True, 1000, 60000, True, True))
+        overlay.update(SessionState("paused", "Self-test", "VLClone", True, 1000, 60000, True, True))
+        overlay.close()
+        return "ok"
+
+    def taskbar() -> str:
+        if sys.platform != "win32":
+            return "skipped (not Windows)"
+        from .integration.win_taskbar import create_taskbar_list
+
+        create_taskbar_list()
+        return "ok (ITaskbarList3 created)"
+
+    def keep_awake() -> str:
+        from .integration.power import SleepInhibitor
+
+        inhibitor = SleepInhibitor()
+        on = inhibitor.set_inhibited(True)
+        off = inhibitor.set_inhibited(False)
+        return f"request {on}, release {off}"
+
+    def file_types() -> str:
+        from .core.associations import all_extensions, association_entries, context_menu_entries
+
+        n = len(association_entries(["video", "audio", "playlist"], "x")) + len(context_menu_entries("x"))
+        return f"{len(all_extensions())} extensions, {n} registry values"
+
+    step("single instance handoff", handoff)
+    step("update check (mocked)", update_check)
+    step("media overlay", media_overlay)
+    step("taskbar", taskbar)
+    step("keep awake", keep_awake)
+    step("file types", file_types)
     return lines
 
 
