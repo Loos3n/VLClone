@@ -73,7 +73,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt pyinstaller pillow
 
-      - name: Version (single source: vlclone/__init__.py)
+      - name: Version (single source, vlclone/__init__.py)
         id: meta
         run: |
           $version = python packaging/make_version_info.py --print
