@@ -58,6 +58,7 @@ def self_test(report: str) -> int:
             backend.stop()
             backend.set_engine_filters(EngineFilters())
             lines.extend(_self_test_phase3(backend, tmp, tone))
+            lines.extend(_self_test_phase4(tmp))
         backend.release()
     except Exception as exc:  # report anything: this runs without a console
         lines.append(f"fail {type(exc).__name__}: {exc}")
@@ -201,6 +202,79 @@ def _self_test_phase3(backend, tmp: str, tone: str) -> list[str]:
     step("library probe", library_probe)
     step("capture devices", devices)
     step("optical drives", lambda: len(list_optical_drives()))
+    return lines
+
+
+def _self_test_phase4(tmp: str) -> list[str]:
+    """MP4 and MP3 conversions through the real queue, every preset probed, an HTTP stream fetched."""
+    import socket
+    import time
+    import urllib.request
+
+    from .core.converter import ConvertQueue, JobState, probe_presets
+    from .core.media_sources import path_to_mrl
+    from .core.streamer import HttpStreamer
+    from .core.transcode import CONVERT_PRESETS, ConvertSettings, mpeg_audio_layer
+    from .core.vlc_backend import VlcTranscoder
+    from .selftest_media import write_tone, write_y4m
+
+    lines: list[str] = []
+    try:
+        engine = VlcTranscoder()
+    except Exception as exc:
+        return [f"converter: fail {type(exc).__name__}: {exc}"]
+    try:
+        folder = os.path.join(tmp, "convert out")  # a space, like real Windows paths
+        os.makedirs(folder, exist_ok=True)
+        video, audio = os.path.join(tmp, "src.y4m"), os.path.join(tmp, "src.wav")
+        write_y4m(video, 160, 120, frames=75)
+        write_tone(audio, 3)
+        queue = ConvertQueue(lambda: engine)
+        for key, name in (("mp4_h264", "it's mp4.mp4"), ("mp3", "song.mp3")):
+            job = queue.add(path_to_mrl(video), key, ConvertSettings(key), os.path.join(folder, name),
+                            [f":input-slave={path_to_mrl(audio)}"])
+            end = time.monotonic() + 60
+            while not job.finished and time.monotonic() < end:
+                queue.tick()
+                time.sleep(0.05)
+            if job.state is JobState.DONE:
+                info = engine.media_info(job.output)
+                extra = f", MPEG layer {mpeg_audio_layer(job.output)}" if key == "mp3" else ""
+                lines.append(f"convert {key}: ok ({'+'.join(info.video + info.audio)}{extra}, "
+                             f"{os.path.getsize(job.output)} bytes)")
+            else:
+                lines.append(f"convert {key}: fail ({job.state.value}: {job.error})")
+        leftovers = [f for f in os.listdir(folder) if f.endswith(".part")]
+        lines.append(f"partial files left: {len(leftovers)}")
+
+        caps = probe_presets(engine, workdir=tmp)
+        ok = [k for k in CONVERT_PRESETS if caps[k].ok]
+        bad = [f"{k} ({caps[k].reason})" for k in CONVERT_PRESETS if not caps[k].ok]
+        lines.append(f"presets working: {', '.join(ok) or 'none'}")
+        lines.append(f"presets disabled: {', '.join(bad) or 'none'}")
+        lines.append(f"screen capture module: {engine.has_module('screen')}")
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        streamer = HttpStreamer(lambda: engine)
+        error = streamer.start(path_to_mrl(video), [f":input-slave={path_to_mrl(audio)}"], "src", 0, "h264", port)
+        data = b""
+        if error is None:
+            end = time.monotonic() + 10
+            while time.monotonic() < end and len(data) < 188 * 20:
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/stream", timeout=3) as resp:
+                        data += resp.read(188 * 20)
+                except OSError:
+                    time.sleep(0.2)
+            streamer.stop()
+        ts = len(data) >= 188 * 5 and all(data[i] == 0x47 for i in range(0, 188 * 5, 188))
+        lines.append(f"http stream out: {'ok' if ts else 'fail'} ({error or f'{len(data)} bytes'})")
+    except Exception as exc:
+        lines.append(f"converter: fail {type(exc).__name__}: {exc}")
+    finally:
+        engine.release()
     return lines
 
 
