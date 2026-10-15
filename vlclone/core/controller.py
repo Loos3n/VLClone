@@ -1075,9 +1075,8 @@ class PlayerController:
         return True
 
     def _report_open_failure(self, item: PlaylistItem, reason: str = "") -> None:
-        message = describe_open_error(item.mrl, reason)
-        self.error.emit(message)
-        self.open_failed.emit(item, message)
+        self.error.emit(f"Could not play {item.title}")  # short form (OSD), as before phase 3
+        self.open_failed.emit(item, describe_open_error(item.mrl, reason))
 
     def _on_error(self) -> None:
         item = self.playlist.current

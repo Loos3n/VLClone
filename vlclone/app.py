@@ -81,6 +81,31 @@ def self_test(report: str) -> int:
     return code
 
 
+def make_library(settings, fake: bool = False):
+    """The media library service; metadata and thumbnails come from libVLC unless faked."""
+    from .core.library import LibraryDB
+    from .core.library_scanner import FilenameProbe, LibraryService
+
+    if fake:
+        from .core.fake_backend import FakeProbe
+
+        factory = FakeProbe
+    else:
+        def factory():
+            from .core.vlc_backend import VlcMediaProbe
+
+            try:
+                return VlcMediaProbe()
+            except Exception:  # libVLC trouble must not stop the library from listing files
+                return FilenameProbe()
+
+    service = LibraryService(LibraryDB(), factory, watch=settings.library_watch,
+                             thumbnails=settings.library_thumbnails)
+    if service.folders():
+        service.rescan()  # incremental: picks up what changed while the app was closed
+    return service
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.self_test:
@@ -127,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     controller = PlayerController(backend, settings, resume, EffectsStore(), EqPresetStore())
     if settings.restore_playlist:
         restore_playlist(controller.playlist)
-    window = MainWindow(controller, settings)
+    library = make_library(settings, fake=args.fake_backend)
+    window = MainWindow(controller, settings, library)
     window.show()
     if args.inputs:
         controller.open(args.inputs)
@@ -141,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         pass
     controller.shutdown()
+    library.shutdown()
     try:
         settings.save()
     except OSError:

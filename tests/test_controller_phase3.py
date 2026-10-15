@@ -138,7 +138,7 @@ def test_remote_playlist_expands_in_place(ctl):
 def test_failed_stream_reports_a_clear_error(ctl):
     errors, failed = [], []
     ctl.error.connect(errors.append)
-    ctl.open_failed.connect(lambda item, msg: failed.append(item.mrl))
+    ctl.open_failed.connect(lambda item, msg: (failed.append(item.mrl), errors.append(msg)))
     ctl.backend.fail_mrls.add("rtsp://cam.local/stream")
     start(ctl, "rtsp://cam.local/stream")
     assert ctl.state is PlaybackState.STOPPED
@@ -148,7 +148,7 @@ def test_failed_stream_reports_a_clear_error(ctl):
 
 def test_youtube_failure_mentions_the_lua_script(ctl):
     errors = []
-    ctl.error.connect(errors.append)
+    ctl.open_failed.connect(lambda item, msg: errors.append(msg))
     ctl.backend.fail_mrls.add("https://youtu.be/xyz")
     start(ctl, "https://youtu.be/xyz")
     assert "youtube.lua" in errors[-1]

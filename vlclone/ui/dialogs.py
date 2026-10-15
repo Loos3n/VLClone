@@ -1,13 +1,10 @@
-"""Small dialogs: open URL, jump to time."""
+"""Small dialogs: base dialog, jump to time."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from ..core.media_sources import is_url
 from ..core.timefmt import format_ms, parse_time
 
 
@@ -36,37 +33,6 @@ class BaseDialog(QDialog):
         self.body.addSpacing(4)
         self.body.addWidget(box)
         return box
-
-
-class OpenUrlDialog(BaseDialog):
-    def __init__(self, recent: list[str] | None = None, parent: QWidget | None = None) -> None:
-        super().__init__("Open network stream", parent)
-        self.setMinimumWidth(520)
-        hint = QLabel("HTTP, HLS, RTSP, RTP/UDP, MMS, FTP… anything VLC can open.")
-        hint.setObjectName("Muted")
-        self.body.addWidget(hint)
-        self.edit = QLineEdit()
-        self.edit.setPlaceholderText("https://example.com/video.m3u8  ·  rtsp://camera.local/stream")
-        clip = QGuiApplication.clipboard().text().strip() if QGuiApplication.clipboard() else ""
-        if clip and is_url(clip) and "\n" not in clip:
-            self.edit.setText(clip)
-            self.edit.selectAll()
-        self.body.addWidget(self.edit)
-        if recent:
-            label = QLabel("Recent")
-            label.setObjectName("SectionTitle")
-            self.body.addWidget(label)
-            for url in recent[:5]:
-                b = QPushButton(url)
-                b.setObjectName("ListRow")
-                b.setCursor(Qt.PointingHandCursor)
-                b.clicked.connect(lambda _=False, u=url: (self.edit.setText(u), self.accept()))
-                self.body.addWidget(b)
-        self.add_buttons("Play")
-        self.edit.setFocus()
-
-    def url(self) -> str:
-        return self.edit.text().strip()
 
 
 class JumpToTimeDialog(BaseDialog):
