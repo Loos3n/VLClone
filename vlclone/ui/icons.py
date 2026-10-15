@@ -464,6 +464,30 @@ def _stream(p, c):
         p.drawArc(QRectF(12 - r, 12 - r, 2 * r, 2 * r), 135 * 16, 90 * 16)
 
 
+@_icon("pin")
+def _pin(p, c):
+    _pen(p, c, 1.9)
+    p.drawLine(QPointF(9, 4.5), QPointF(15, 4.5))
+    p.drawPolyline(_poly((10, 4.5), (10, 9.5), (7, 13.5), (17, 13.5), (14, 9.5), (14, 4.5)))
+    p.drawLine(QPointF(12, 13.5), QPointF(12, 19.5))
+
+
+@_icon("mini-player")
+def _mini_player(p, c):
+    _pen(p, c, 1.8)
+    p.drawRoundedRect(QRectF(3.5, 5, 17, 14), 2, 2)
+    _fill(p, c)
+    p.drawRoundedRect(QRectF(11.5, 11.5, 7, 5.5), 1.2, 1.2)
+
+
+@_icon("expand")
+def _expand(p, c):
+    _pen(p, c, 1.8)
+    p.drawRoundedRect(QRectF(3.5, 5, 17, 14), 2, 2)
+    p.drawPolyline(_poly((10, 9), (15, 9), (15, 14)))
+    p.drawLine(QPointF(15, 9), QPointF(9, 15))
+
+
 class _PaintedEngine(QIconEngine):
     def __init__(self, painter: Painter, color: str | None) -> None:
         super().__init__()

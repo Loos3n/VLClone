@@ -86,6 +86,7 @@ class SeekSlider(QWidget):
     """Timeline with hover time preview, drag-to-seek, A-B and chapter markers."""
 
     seek_requested = Signal(int)  # ms
+    hovered = Signal(int)         # ms under the cursor (-1 when it leaves), for seek previews
 
     BUBBLE_SPACE = 30
     TRACK_ZONE = 18
@@ -178,10 +179,22 @@ class SeekSlider(QWidget):
         self._hover_x = None
         if not self._dragging:
             self._animate(0.0)
+        self.hovered.emit(-1)
         self.update()
+
+    def hover_ms(self) -> int:
+        """The time under the cursor (or being dragged to); -1 when not hovering."""
+        if self._hover_x is None or self._length <= 0:
+            return -1
+        return self._drag_ms if self._dragging else self._x_to_ms(self._hover_x)
+
+    def x_for(self, ms: int) -> float:
+        return self._ms_to_x(ms)
 
     def mouseMoveEvent(self, e) -> None:
         self._hover_x = e.position().x()
+        if self._length > 0:
+            self.hovered.emit(self._drag_ms if self._dragging else self._x_to_ms(self._hover_x))
         if self._dragging:
             self._drag_ms = self._x_to_ms(self._hover_x)
             self._position = self._drag_ms

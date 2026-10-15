@@ -521,13 +521,16 @@ def apply_theme(app: QApplication, mode: str = "dark", accent: str = DEFAULT_ACC
         hints.unsetColorScheme()  # read the OS scheme, not an override we set earlier
     resolved = resolve_mode(mode)
     set_tokens(resolved, accent)
-    app.setStyle("Fusion")
+    # Each of these re-polishes every widget: only do what actually changes.
+    if app.style().name().lower() != "fusion":
+        app.setStyle("Fusion")
     if mode != "system" and hasattr(hints, "setColorScheme"):
         # Qt 6.8+: the native title bars and dialogs follow the app's choice too.
         hints.setColorScheme(Qt.ColorScheme.Dark if resolved == "dark" else Qt.ColorScheme.Light)
-    app.setPalette(_palette())
-    app.setFont(app_font())
-    app.setStyleSheet(STYLE_SHEET)
+    if app.styleSheet() != STYLE_SHEET:
+        app.setPalette(_palette())
+        app.setFont(app_font())
+        app.setStyleSheet(STYLE_SHEET)
     if not _system_hooked:
         _system_hooked = True
         try:

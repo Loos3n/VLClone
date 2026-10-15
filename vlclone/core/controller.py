@@ -542,6 +542,15 @@ class PlayerController:
         if was_paused:
             self._pause_after_start = True
 
+    def reload_media(self) -> None:
+        """Reload what is playing at the same position (e.g. the video window was recreated)."""
+        if not self.has_media:
+            return
+        was_paused = self.backend.state() is PlaybackState.PAUSED
+        self._start_current(seek_to=max(0, self.backend.time()), reload=True)
+        if was_paused:
+            self._pause_after_start = True
+
     def rotate(self) -> None:
         self.set_rotation(cycle(ROTATIONS, self.video.rotation))
 

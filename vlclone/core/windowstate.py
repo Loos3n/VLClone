@@ -13,8 +13,8 @@ from dataclasses import asdict, dataclass
 
 DEFAULT_SIZE = (1280, 760)
 MIN_SIZE = (640, 400)
-MINI_DEFAULT = (420, 236)
-MINI_MIN = (280, 158)
+MINI_DEFAULT = (426, 240)
+MINI_MIN = (320, 180)  # the video surface's own minimum
 
 
 @dataclass(frozen=True)

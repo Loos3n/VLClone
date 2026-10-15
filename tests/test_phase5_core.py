@@ -14,7 +14,8 @@ from vlclone.core.settings import SECTIONS, SETTINGS_VERSION, Settings, migrate,
 from vlclone.core.shortcuts import DEFAULT_SHORTCUTS, find_conflicts, resolve_shortcuts
 from vlclone.core.updates import (Release, UpdateChecker, check_for_update, is_due, is_newer,
                                   parse_release, parse_version)
-from vlclone.core.windowstate import Rect, SavedWindow, ScreenInfo, plan_mini, plan_restore
+from vlclone.core.windowstate import (MINI_DEFAULT, MINI_MIN, Rect, SavedWindow, ScreenInfo, plan_mini,
+                                      plan_restore)
 
 
 # ------------------------------------------------------------------ settings migration
@@ -280,9 +281,11 @@ def test_restore_defaults_and_round_trip():
 
 
 def test_mini_player_placement():
-    assert plan_mini(None, [LEFT]) == Rect(1920 - 420 - 24, 1040 - 236 - 24, 420, 236)
+    w, h = MINI_DEFAULT
+    assert plan_mini(None, [LEFT]) == Rect(1920 - w - 24, 1040 - h - 24, w, h)
     assert plan_mini([2000, 50, 400, 225], [LEFT, RIGHT_4K]) == Rect(2000, 50, 400, 225)
-    assert plan_mini([9000, 50, 400, 225], [LEFT]).x == 1920 - 420 - 24
+    assert plan_mini([9000, 50, 400, 225], [LEFT]).x == 1920 - w - 24
+    assert plan_mini([100, 100, 50, 30], [LEFT]).w == MINI_MIN[0]  # never below the video minimum
 
 
 # ------------------------------------------------------------------ desktop integration state
@@ -409,3 +412,78 @@ def test_per_user_registration_round_trip():
     leftovers = [(k, n) for k, vals in reg.data.items() for n in vals if "vlclone" in (k + n).lower()]
     assert leftovers == []
     assert reg.notified == 2
+
+
+# ------------------------------------------------------------------ crash handling and logs
+def _dead_pid():
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_crashed_session_becomes_a_report(tmp_path):
+    from vlclone.core.diagnostics import CrashGuard
+
+    pid = _dead_pid()
+    (tmp_path / f"session-{pid}.json").write_text(json.dumps({"pid": pid, "version": "0.9", "started": "x"}))
+    (tmp_path / f"fault-{pid}.log").write_text("Fatal Python error: Segmentation fault\n  File libvlc...")
+    (tmp_path / "vlclone.log").write_text("line 1\nlast words\n")
+    guard = CrashGuard(tmp_path)
+    reports = guard.collect_crashes()
+    assert len(reports) == 1
+    text = reports[0].read_text()
+    assert "Segmentation fault" in text and "last words" in text and "version 0.9" in text
+    assert not (tmp_path / f"session-{pid}.json").exists() and not (tmp_path / f"fault-{pid}.log").exists()
+    assert guard.collect_crashes() == []  # reported once
+
+
+def test_clean_session_leaves_nothing_and_running_ones_are_ignored(tmp_path):
+    import os
+
+    from vlclone.core.diagnostics import CrashGuard
+
+    other = tmp_path / f"session-{os.getppid()}.json"  # a live process (another running instance)
+    other.write_text("{}")
+    guard = CrashGuard(tmp_path)
+    guard.start()
+    try:
+        assert guard.marker.exists() and guard.fault_path.exists()
+        assert guard.collect_crashes() == []
+    finally:
+        guard.stop()
+    assert not guard.marker.exists() and not guard.fault_path.exists() and other.exists()
+
+
+def test_fatal_exception_is_reported_next_time(tmp_path):
+    from vlclone.core.diagnostics import CrashGuard
+
+    guard = CrashGuard(tmp_path, pid=_dead_pid())
+    guard.start()
+    try:
+        raise RuntimeError("boom in main")
+    except RuntimeError as exc:
+        guard.fatal(exc)
+    marker = guard.marker.read_text()
+    guard.stop()  # restores the hooks; a real crash would have exited before this
+    guard.marker.write_text(marker)
+    reports = CrashGuard(tmp_path).collect_crashes()
+    assert len(reports) == 1 and "boom in main" in reports[0].read_text()
+
+
+def test_logs_rotate(tmp_path):
+    from vlclone.core import diagnostics
+
+    path = diagnostics.setup_logging(tmp_path)
+    for i in range(6000):
+        diagnostics.log.info("line %d %s", i, "x" * 200)
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert "vlclone.log" in names and "vlclone.log.1" in names
+    assert len([n for n in names if n.startswith("vlclone.log")]) <= 1 + diagnostics.LOG_BACKUPS
+    assert all(p.stat().st_size <= diagnostics.LOG_BYTES + 1000 for p in tmp_path.iterdir())
+    for h in list(diagnostics.log.handlers):
+        diagnostics.log.removeHandler(h)
+        h.close()
+    assert path.exists()

@@ -138,6 +138,35 @@ class Toast(QWidget):
             self._fader.fade_to(0.0)
 
 
+class SeekPreview(QWidget):
+    """Thumbnail + time shown above the seek bar while hovering (frames from SeekPreviewService)."""
+
+    WIDTH = 176
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("SeekPreview")
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setSpacing(0)
+        self.image = QLabel()
+        self.image.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.image)
+        self.ms = -1
+        self.hide()
+
+    def set_frame(self, pixmap, ms: int) -> None:
+        self.ms = ms
+        w = self.WIDTH
+        h = max(1, int(w * pixmap.height() / max(1, pixmap.width())))
+        scaled = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image.setPixmap(scaled)
+        self.image.setFixedSize(scaled.size())
+        self.adjustSize()
+
+
 class ControlsPanel(QWidget):
     """Seek row + transport/tool buttons."""
 
@@ -221,8 +250,29 @@ class ControlsPanel(QWidget):
         add("quick_settings", "sliders", "Tracks, speed & video (Ctrl+E)", 36, 20)
         add("toggle_playlist", "playlist", "Playlist (Ctrl+L)", 36, 20)
         add("fullscreen", "fullscreen", "Fullscreen (F)", 36, 20)
+        add("mini_player", "expand", "Back to the full window (Ctrl+Shift+M)", 34, 20).hide()
         add("main_menu", "more", "More", 36, 20)
         outer.addLayout(row)
+        self._outer = outer
+        self._compact = False
+
+    # Shown in the mini player; everything else hides there.
+    COMPACT = ("play_pause", "previous", "next", "mute", "mini_player", "main_menu")
+
+    def set_compact(self, on: bool) -> None:
+        if on == self._compact:
+            return
+        self._compact = on
+        for name, b in self.buttons.items():
+            b.setVisible(name in self.COMPACT if on else name != "mini_player")
+        for w in (self.volume, self.volume_label, self.speed_chip):
+            w.setVisible(not on)
+        if on:
+            self.chapter_chip.hide()
+        self._outer.setContentsMargins(*((10, 0, 10, 6) if on else (18, 0, 18, 14)))
+        for lbl in (self.time_label, self.length_label):
+            lbl.setMinimumWidth(40 if on else 56)
+            lbl.setFont(theme.app_font(8.5 if on else 10))
 
     def _toggle_remaining(self) -> None:
         self._show_remaining = not self._show_remaining
@@ -283,6 +333,16 @@ class OverlayWindow(QWidget):
         top.addSpacing(10)
         top.addWidget(self.subtitle)
         top.addStretch(1)
+        self.top_buttons: dict[str, IconButton] = {}
+        for name, icon_name, tip in (("always_on_top", "pin", "Keep on top — picture in picture (Ctrl+Shift+T)"),
+                                     ("mini_player", "mini-player", "Mini player (Ctrl+Shift+M)"),
+                                     ("quit", "close", "Close")):
+            b = IconButton(icon_name, tip, 30, 17, color="@VIDEO_TEXT")
+            b.clicked.connect(lambda _=False, a=name: self.trigger(a))
+            self.top_buttons[name] = b
+            top.addWidget(b)
+        self.top_buttons["quit"].hide()  # only the frameless mini player needs its own close button
+        self._top_layout = top
         root.addWidget(self.top_bar)
 
         self.center = QStackedWidget()
@@ -291,7 +351,11 @@ class OverlayWindow(QWidget):
         self.empty_page.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.welcome = WelcomeCard(trigger)
         self.audio_card = AudioCard()
-        for w in (self.empty_page, self.welcome, self.audio_card):
+        self.compact_welcome = QLabel("Drop media here")
+        self.compact_welcome.setObjectName("Muted")
+        self.compact_welcome.setAlignment(Qt.AlignCenter)
+        self.compact_welcome.setAttribute(Qt.WA_TransparentForMouseEvents)
+        for w in (self.empty_page, self.welcome, self.audio_card, self.compact_welcome):
             self.center.addWidget(w)
         root.addWidget(self.center, 1)
 
@@ -300,6 +364,10 @@ class OverlayWindow(QWidget):
 
         self.osd = FadingLabel(self)
         self.toast = Toast(self)
+        self.preview = SeekPreview(self)
+        self.compact = False
+        self._press_pos: QPoint | None = None
+        self._moving = False
         # Stays visible while the controls fade: you should always know you are recording.
         self.rec = QLabel(self)
         self.rec.setStyleSheet("background: rgba(214, 48, 58, 0.92); color: white; border-radius: 10px;"
@@ -378,8 +446,44 @@ class OverlayWindow(QWidget):
 
     # ---------------------------------------------------------------- content
     def show_welcome(self, on: bool) -> None:
-        self.center.setCurrentWidget(self.welcome if on else self.empty_page)
+        self.center.setCurrentWidget((self.compact_welcome if self.compact else self.welcome) if on
+                                     else self.empty_page)
         self.update()
+
+    def set_compact(self, on: bool) -> None:
+        """The mini player's layout: transport buttons and the seek bar, a smaller title."""
+        self.compact = on
+        self.controls.set_compact(on)
+        self.top_buttons["always_on_top"].setVisible(not on)
+        self.top_buttons["mini_player"].setVisible(not on)
+        self.top_buttons["quit"].setVisible(on)
+        self._top_layout.setContentsMargins(*((12, 6, 6, 0) if on else (22, 14, 22, 8)))
+        tf = theme.app_font(9.5 if on else 12)
+        tf.setWeight(tf.Weight.DemiBold)
+        self.title.setFont(tf)
+        self.subtitle.setVisible(not on)
+        if self.center.currentWidget() in (self.welcome, self.compact_welcome):
+            self.show_welcome(True)
+        self.preview.hide()
+        self._place_floating()
+        self.update()
+
+    def update_on_top(self, on: bool) -> None:
+        self.top_buttons["always_on_top"].set_accent(on)
+
+    def show_preview(self, pixmap, ms: int) -> None:
+        """A seek-bar thumbnail above the hovered time (``pixmap`` None: just hide)."""
+        seek = self.controls.seek
+        if pixmap is None or ms < 0 or not self.controls.isVisible():
+            self.preview.hide()
+            return
+        self.preview.set_frame(pixmap, ms)
+        x = seek.mapTo(self, QPoint(int(seek.x_for(ms)), 0)).x()
+        y = seek.mapTo(self, QPoint(0, 0)).y()
+        left = min(max(8, x - self.preview.width() // 2), self.width() - self.preview.width() - 8)
+        self.preview.move(left, max(4, y - self.preview.height() + 2))
+        self.preview.show()
+        self.preview.raise_()
 
     def show_audio_card(self, title: str, subtitle: str = "") -> None:
         self.audio_card.title.setText(title)
@@ -389,7 +493,8 @@ class OverlayWindow(QWidget):
 
     def set_title(self, title: str, subtitle: str = "") -> None:
         fm = self.title.fontMetrics()
-        self.title.setText(fm.elidedText(title, Qt.ElideMiddle, max(200, self.width() - 300)))
+        room = self.width() - (140 if self.compact else 300)
+        self.title.setText(fm.elidedText(title, Qt.ElideMiddle, max(120 if self.compact else 200, room)))
         self.title.setToolTip(title)
         self.subtitle.setText(subtitle)
 
@@ -505,10 +610,29 @@ class OverlayWindow(QWidget):
     # ----------------------------------------------------------------- input
     def mouseMoveEvent(self, e) -> None:
         self.reveal()
+        if self.compact and self._press_pos is not None and e.buttons() & Qt.LeftButton:
+            delta = e.globalPosition().toPoint() - self._press_pos
+            if self._moving or delta.manhattanLength() > 6:
+                self._click_timer.stop()
+                host = self.parentWidget()
+                if not self._moving:
+                    self._moving = True
+                    handle = host.windowHandle()
+                    if handle is not None and handle.startSystemMove():
+                        self._press_pos = None  # the window manager drags from here
+                        return
+                    self._origin = host.pos()
+                host.move(self._origin + delta)
+
+    def mouseReleaseEvent(self, e) -> None:
+        self._press_pos = None
+        self._moving = False
 
     def mousePressEvent(self, e) -> None:
         self.pressed.emit()
         if e.button() == Qt.LeftButton:
+            self._press_pos = e.globalPosition().toPoint()
+            self._moving = False
             self._click_timer.start(250)
 
     def mouseDoubleClickEvent(self, e) -> None:

@@ -16,7 +16,15 @@ from vlclone.ui import theme  # noqa: E402
 
 @pytest.fixture
 def app():
+    from PySide6.QtCore import QCoreApplication, QEvent
+
     application = QApplication.instance() or QApplication([])
+    # Earlier test modules leave dozens of windows alive; every theme switch re-polishes all of
+    # them, so start from a clean application (the real app has one window).
+    for w in application.topLevelWidgets():
+        w.hide()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     yield application
     theme.apply_theme(application)  # other test modules expect the default dark theme
 

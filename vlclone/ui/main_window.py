@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEasingCurve, QPoint, QRect, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QActionGroup, QCloseEvent
+from PySide6.QtCore import QByteArray, QEasingCurve, QPoint, QRect, Qt, QTimer, QUrl, QVariantAnimation
+from PySide6.QtGui import QActionGroup, QCloseEvent, QDesktopServices, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QSplitter,
                                QStackedWidget)
 
 from .. import APP_NAME
 from ..core.backend import PlaybackState
+from ..core.desktop import SessionState, status_for
+from ..core.instance import HandoffBatcher, HandoffMessage
+from ..core.seek_preview import SeekPreviewService
+from ..core.updates import UpdateChecker, is_due
+from ..core.windowstate import MINI_MIN, Rect, SavedWindow, ScreenInfo, plan_mini, plan_restore
 from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS, ZOOM_LEVELS,
                                PlayerController, zoom_label)
 from ..core.effects import STEREO_MODES
@@ -43,7 +51,10 @@ from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
 from .settings_dialog import SettingsDialog
 from .quick_settings import AudioPage, ChaptersPage, QuickSettings, SubtitlesPage, VideoPage
+from .desktop import MEDIA_COMMANDS, DesktopIntegration
 from .video_surface import VideoSurface
+
+log = logging.getLogger("vlclone.ui")
 
 
 def _filter(name: str, exts) -> str:
@@ -64,7 +75,8 @@ class MainWindow(QMainWindow):
     TICK_MS = 100
 
     def __init__(self, controller: PlayerController, settings: Settings,
-                 library: LibraryService | None = None, transcoder_factory=None, probe_factory=None) -> None:
+                 library: LibraryService | None = None, transcoder_factory=None, probe_factory=None,
+                 preview_probe_factory=None) -> None:
         super().__init__()
         self.ctl = controller
         self.settings = settings
@@ -116,7 +128,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.splitter)
 
         self.overlay = OverlayWindow(self, self.actions.trigger, settings.controls_hide_delay_ms)
-        self.overlay.double_clicked.connect(self.toggle_fullscreen)
+        self.overlay.double_clicked.connect(self._video_double_clicked)
+        self.overlay.controls.seek.hovered.connect(self._seek_hovered)
         self.overlay.clicked.connect(self._video_clicked)
         self.overlay.pressed.connect(self.take_focus)
         self.overlay.wheel.connect(self.ctl.change_volume)
@@ -142,14 +155,30 @@ class MainWindow(QMainWindow):
         self._sidebar_anim.finished.connect(self._sidebar_anim_done)
         self._sidebar_target_visible = settings.playlist_visible
 
+        # Phase 5: mini player, seek previews, single-instance handoff, OS integration, updates.
+        self.mini_mode = False
+        self._before_mini: dict = {}
+        self._pending_state: tuple[bool, bool] = (False, False)  # (maximized, fullscreen) to apply after show
+        self.previews = SeekPreviewService(preview_probe_factory or self.library.probe_factory,
+                                           self.library.thumbs_dir / "seek")
+        self.previews.enabled = settings.seek_previews
+        self._preview_ms = -1
+        self._preview_pixmaps: dict[str, QPixmap] = {}
+        self._has_video = False
+        self._session_meta: tuple[str, str] = ("", "")
+        self.handoff = HandoffBatcher(settings.instance_open_mode)
+        self._raise_requested = False
+        self.desktop = DesktopIntegration(settings, self._run_media_command)
+        self.updates = UpdateChecker()
+        self._manual_update_check = None  # callback(result) while the About page asked
+
         self._register_actions()
         self._connect_controller()
         if not settings.playlist_visible:
             self.sidebar.hide()
-        if settings.window_geometry:
-            self.restoreGeometry(QByteArray.fromBase64(settings.window_geometry.encode()))
         if settings.always_on_top:
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.overlay.update_on_top(settings.always_on_top)
 
         self._timer = QTimer(self, interval=self.TICK_MS)
         self._timer.timeout.connect(self._tick)
@@ -217,9 +246,14 @@ class MainWindow(QMainWindow):
         a.register("clear_playlist", self._clear_playlist, "Clear playlist")
         a.register("save_playlist", self.save_playlist_dialog)
         a.register("load_playlist", self.load_playlist_dialog, "Load playlist…")
-        a.register("always_on_top", self.toggle_always_on_top, "Always on top", checkable=True)
+        a.register("always_on_top", self.toggle_always_on_top, "Always on top (picture in picture)",
+                   checkable=True)
         a.get("always_on_top").setChecked(s.always_on_top)
+        a.register("mini_player", self.toggle_mini_player, "Mini player", checkable=True)
         self.register_feature_actions()
+        for command in ("play_pause", "next", "previous", "stop"):
+            # Shortcuts include the media keys; the media overlay may report the same press.
+            a.get(command).triggered.connect(lambda _=False, c=command: self.desktop.shortcut_used(c))
 
     def register_feature_actions(self) -> None:
         """Tracks, delays and video adjustments."""
@@ -328,6 +362,9 @@ class MainWindow(QMainWindow):
             self._update_media_kind()
 
     def _on_media(self, item) -> None:
+        self._has_video = False
+        self._session_meta = (item.title, "") if item is not None else ("", "")
+        self._preview_pixmaps.clear()
         if item is None:
             self.setWindowTitle(APP_NAME)
             self.overlay.set_title("")
@@ -345,8 +382,11 @@ class MainWindow(QMainWindow):
         item = self.ctl.playlist.current
         if video and video.width:
             self.overlay.set_title(item.title if item else "", f"{video.width}×{video.height}")
+        self._has_video = video is not None
+        meta = info.meta
+        self._session_meta = (meta.get("Title") or (item.title if item else ""),
+                              meta.get("Artist", "") if video is None else "")
         if streams and video is None:
-            meta = info.meta
             subtitle = " — ".join(x for x in (meta.get("Artist", ""), meta.get("Album", "")) if x)
             self.overlay.show_audio_card(meta.get("Title") or (item.title if item else ""), subtitle)
         elif self.ctl.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
@@ -357,6 +397,7 @@ class MainWindow(QMainWindow):
         self.library.tick()
         self.converter.tick()
         self.recorder.tick()
+        self._tick_phase5()
         self.overlay.update_recording(self.recorder.active, self.recorder.elapsed_ms())
         if self.library_visible:
             item = self.ctl.playlist.current if self.ctl.has_media else None
@@ -586,6 +627,8 @@ class MainWindow(QMainWindow):
 
     # ============================================================ fullscreen
     def toggle_fullscreen(self) -> None:
+        if self.mini_mode:
+            self.set_mini_player(False)
         if self.library_visible:
             self.show_player()
         if self.isFullScreen():
@@ -606,6 +649,9 @@ class MainWindow(QMainWindow):
         if self.effects_panel.isVisible():
             self.effects_panel.hide()
             return
+        if self.mini_mode:
+            self.set_mini_player(False)
+            return
         if not self.isFullScreen():
             return
         if self._was_maximized:
@@ -618,11 +664,14 @@ class MainWindow(QMainWindow):
         self.overlay.update_fullscreen(False)
 
     def toggle_always_on_top(self) -> None:
+        """Picture in picture: the normal window stays above other windows (Ctrl+Shift+T)."""
         on = not self.settings.always_on_top
         self.settings.always_on_top = on
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
-        self.show()
+        if not self.mini_mode:  # the mini player is always on top anyway
+            self._set_flags(Qt.WindowStaysOnTopHint, on)
         self.actions.get("always_on_top").setChecked(on)
+        self.overlay.update_on_top(on)
+        self._osd("Keep on top: on" if on else "Keep on top: off")
 
     # =============================================================== opening
     def open_inputs(self, inputs: list[str], play: bool = True) -> None:
@@ -820,6 +869,9 @@ class MainWindow(QMainWindow):
         view.addAction(a("toggle_playlist"))
         view.addAction(a("fullscreen"))
         view.addAction(a("always_on_top"))
+        mini = a("mini_player")
+        mini.setChecked(self.mini_mode)
+        view.addAction(mini)
         menu.addAction(icon("info"), "Media information", self.show_media_info).setShortcut(
             a("media_info").shortcut())
         menu.addAction(icon("settings"), "Settings", self.show_settings).setShortcut(a("settings").shortcut())
@@ -943,10 +995,13 @@ class MainWindow(QMainWindow):
         self._media_info.show()
         self._media_info.raise_()
 
-    def show_settings(self) -> None:
-        dlg = SettingsDialog(self.settings, self.apply_settings, self)
+    def show_settings(self, section: str | None = None) -> SettingsDialog:
+        dlg = SettingsDialog(self.settings, self.apply_settings, self, host=self)
         dlg.set_engine_version(self.ctl.backend.engine_version())
+        if section:
+            dlg.show_section(section)
         dlg.exec()
+        return dlg
 
     def apply_settings(self) -> None:
         """Apply what can change live; engine options apply on next start."""
@@ -958,14 +1013,17 @@ class MainWindow(QMainWindow):
         self.actions.apply_bindings(s.shortcuts)
         if (s.theme, s.accent_color) != theme.requested():
             theme.apply_theme(QApplication.instance(), s.theme, s.accent_color)
-        if bool(self.windowFlags() & Qt.WindowStaysOnTopHint) != s.always_on_top:
-            self.setWindowFlag(Qt.WindowStaysOnTopHint, s.always_on_top)
-            self.show()
+        if not self.mini_mode and bool(self.windowFlags() & Qt.WindowStaysOnTopHint) != s.always_on_top:
+            self._set_flags(Qt.WindowStaysOnTopHint, s.always_on_top)
         self.actions.get("always_on_top").setChecked(s.always_on_top)
+        self.overlay.update_on_top(s.always_on_top)
         if self.ctl.resume:
             self.ctl.resume.min_position_ms = s.resume_min_seconds * 1000
         self.library.watch = s.library_watch
         self.library.thumbnails = s.library_thumbnails
+        self.previews.enabled = s.seek_previews
+        self.handoff.default_mode = s.instance_open_mode
+        self.desktop.apply_settings()
         if s.effects_scope != self._effects_scope:
             new_scope, s.effects_scope = s.effects_scope, self._effects_scope
             self.ctl.set_effects_scope(new_scope)
@@ -991,6 +1049,292 @@ class MainWindow(QMainWindow):
         if self.ctl.snapshot() is None and not self.ctl.has_media:
             self.overlay.flash("Nothing to snapshot")
 
+
+    # ============================================================== phase 5
+    def _tick_phase5(self) -> None:
+        batch = self.handoff.take()
+        if batch is not None or self._raise_requested:
+            for req in batch or []:
+                self.open_inputs(req.inputs, req.play)
+                if req.play and self.library_visible:
+                    self.show_player()
+            self._raise_requested = False
+            self.bring_to_front()
+        session = self.session_state()
+        self.desktop.tick(session)
+        if self.settings.seek_previews and self._has_video and self.ctl.has_media:
+            item = self.ctl.playlist.current
+            local = mrl_to_path(item.mrl) if item else None
+            self.previews.set_media(local, self.ctl.length())
+        elif self.previews.active:
+            self.previews.set_media(None)
+        if self._preview_ms >= 0:
+            self._seek_hovered(self._preview_ms)  # the exact frame may be ready by now
+        result = self.updates.poll()
+        if result is not None:
+            self._update_result(result)
+
+    def session_state(self) -> SessionState:
+        """The player as the OS media overlay / taskbar see it."""
+        c = self.ctl
+        item = c.playlist.current if c.has_media else None
+        if item is None:
+            return SessionState()
+        title, artist = self._session_meta
+        n = len(c.playlist)
+        return SessionState(status_for(c.state), title or item.title, artist, self._has_video,
+                            max(0, c.time()), c.length(),
+                            can_previous=n > 1 or c.time() > 3000, can_next=c.playlist.peek_next() >= 0)
+
+    def _run_media_command(self, command: str) -> None:
+        """From the media overlay / taskbar buttons / media keys."""
+        c = self.ctl
+        if command == "play":
+            c.play()
+        elif command == "pause":
+            c.pause()
+        elif command == "play_pause":
+            c.toggle_play()
+        elif command in ("next", "previous", "stop"):
+            getattr(c, command)()
+
+    def nativeEvent(self, event_type, message):  # noqa: N802 (Qt API)
+        if sys.platform == "win32" and event_type == b"windows_generic_MSG" and self.desktop.taskbar is not None:
+            try:
+                from ctypes import wintypes
+
+                if self.desktop.handle_native(wintypes.MSG.from_address(int(message))):
+                    return True, 0
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
+
+    # ----------------------------------------------------- single instance
+    def handoff_received(self, msg: HandoffMessage) -> None:
+        """Files from a second launch (Explorer, "Play with VLClone"…); batched, see core/instance."""
+        if msg.inputs:
+            self.handoff.add(msg)
+        else:
+            self._raise_requested = True
+
+    def bring_to_front(self) -> None:
+        if self.isMinimized():
+            self.showNormal() if not self.isFullScreen() else self.showFullScreen()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    # ----------------------------------------------------- seek previews
+    def _seek_hovered(self, ms: int) -> None:
+        self._preview_ms = ms
+        if ms < 0 or not self.previews.active:
+            self.overlay.show_preview(None, -1)
+            return
+        path = self.previews.frame_for(ms)
+        if path is None:
+            self.overlay.show_preview(None, -1)
+            return
+        pm = self._preview_pixmaps.get(path)
+        if pm is None:
+            pm = QPixmap(path)
+            if pm.isNull():
+                return
+            if len(self._preview_pixmaps) > 64:
+                self._preview_pixmaps.clear()
+            self._preview_pixmaps[path] = pm
+        self.overlay.show_preview(pm, ms)
+
+    # ------------------------------------------------- mini player / flags
+    def _set_flags(self, flags, on: bool) -> None:
+        """Change window flags without losing the video: libVLC draws into the surface's native
+        window, so if Qt had to recreate it, hand libVLC the new one and reload in place."""
+        before = self.video.native_handle() if self._attached else 0
+        visible = self.isVisible()
+        current = self.windowFlags()
+        wanted = (current | flags) if on else (current & ~flags)
+        if wanted == current:
+            return
+        self.setWindowFlags(wanted)
+        if visible:
+            self.show()
+        if self._attached:
+            after = self.video.native_handle()
+            if after != before:
+                log.info("video window recreated (%#x -> %#x); reattaching", before, after)
+                self.ctl.backend.set_video_output(after)
+                self.ctl.reload_media()
+        QTimer.singleShot(0, self._sync_overlay)
+
+    def _video_double_clicked(self) -> None:
+        if self.mini_mode:
+            self.set_mini_player(False)
+        else:
+            self.toggle_fullscreen()
+
+    def toggle_mini_player(self) -> None:
+        self.set_mini_player(not self.mini_mode)
+
+    def set_mini_player(self, on: bool) -> None:
+        """A small frameless always-on-top window with basic controls (Ctrl+Shift+M)."""
+        if on == self.mini_mode:
+            return
+        if on:
+            if self.isFullScreen():
+                self.leave_fullscreen()
+            self._before_mini = {"geometry": self.normalGeometry(), "maximized": self.isMaximized(),
+                                 "sidebar": self.sidebar.isVisible(), "library": self.library_visible}
+            self.quick.hide()
+            self.effects_panel.hide()
+            if self.library_visible:
+                self.show_player()
+            self.sidebar.hide()
+            self.mini_mode = True
+            self.overlay.set_compact(True)
+            self.setMinimumSize(*MINI_MIN)
+            if self.isMaximized():
+                self.showNormal()
+            self._set_flags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint, True)
+            r = plan_mini(self.settings.window_state.get("mini"), self._screens())
+            self.setGeometry(r.x, r.y, r.w, r.h)
+        else:
+            self._remember_mini_rect()
+            self.mini_mode = False
+            self.overlay.set_compact(False)
+            self._set_flags(Qt.FramelessWindowHint, False)
+            if not self.settings.always_on_top:
+                self._set_flags(Qt.WindowStaysOnTopHint, False)
+            self.setMinimumSize(640, 400)
+            before = self._before_mini
+            if before.get("geometry") is not None:
+                self.setGeometry(before["geometry"])
+            if before.get("maximized"):
+                self.showMaximized()
+            if before.get("sidebar", self.settings.playlist_visible):
+                self.sidebar.show()
+                self._apply_sidebar_width(self.settings.playlist_width)
+            if before.get("library"):
+                self.show_library()
+        self.actions.get("mini_player").setChecked(self.mini_mode)
+        self.overlay.show_welcome(not self.ctl.has_media)
+        if self.ctl.has_media:
+            self._update_media_kind()
+        QTimer.singleShot(0, self._sync_overlay)
+
+    def _remember_mini_rect(self) -> None:
+        if self.mini_mode:
+            g = self.geometry()
+            self.settings.window_state = {**self.settings.window_state, "mini": [g.x(), g.y(), g.width(), g.height()]}
+
+    # ------------------------------------------------------- window state
+    @staticmethod
+    def _screens() -> list[ScreenInfo]:
+        primary = QGuiApplication.primaryScreen()
+        out = []
+        for sc in QGuiApplication.screens():
+            g = sc.availableGeometry()
+            out.append(ScreenInfo(sc.name(), Rect(g.x(), g.y(), g.width(), g.height()), sc.devicePixelRatio(),
+                                  sc is primary))
+        return out
+
+    def save_window_state(self) -> None:
+        """Size, position, monitor, maximized and fullscreen (the mini player keeps its own spot)."""
+        self._remember_mini_rect()
+        if self.mini_mode:
+            g, maximized, fullscreen = self._before_mini.get("geometry"), self._before_mini.get("maximized"), False
+        else:
+            g, maximized, fullscreen = self.normalGeometry(), self.isMaximized(), self.isFullScreen()
+            if fullscreen:
+                maximized = self._was_maximized
+        if g is None or not g.isValid():
+            g = self.geometry()
+        screen = self.screen()
+        area = screen.availableGeometry() if screen else None
+        saved = SavedWindow(Rect(g.x(), g.y(), g.width(), g.height()), screen.name() if screen else "",
+                            Rect(area.x(), area.y(), area.width(), area.height()) if area else None,
+                            screen.devicePixelRatio() if screen else 1.0, bool(maximized), bool(fullscreen))
+        mini = self.settings.window_state.get("mini")
+        self.settings.window_state = {**saved.to_dict(), **({"mini": mini} if mini else {})}
+        self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()  # for older versions
+
+    def restore_window_state(self) -> None:
+        """Before the first show: put the window where it was, on a monitor that still exists."""
+        saved = SavedWindow.from_dict(self.settings.window_state)
+        screens = self._screens()
+        if (saved is None or saved.rect is None) and self.settings.window_geometry:
+            # Settings from phases 1-4: Qt's own blob (it already keeps windows on screen).
+            self.restoreGeometry(QByteArray.fromBase64(self.settings.window_geometry.encode()))
+            return
+        if not screens:
+            return
+        plan = plan_restore(saved, screens)
+        target = next((sc for sc in QGuiApplication.screens() if sc.name() == plan.screen), None)
+        if target is not None:
+            # On mixed-DPI setups the screen must be known before the geometry is applied,
+            # or Qt scales the size with the wrong monitor's factor.
+            self.setScreen(target)
+        r = plan.rect
+        self.setGeometry(r.x, r.y, r.w, r.h)
+        self._pending_state = (plan.maximized, plan.fullscreen)
+
+    def after_show(self) -> None:
+        maximized, fullscreen = self._pending_state
+        self._pending_state = (False, False)
+        if fullscreen:
+            self._was_maximized = maximized
+            self.toggle_fullscreen()
+            self._was_maximized = maximized
+        elif maximized:
+            self.showMaximized()
+        self.desktop.attach(int(self.winId()))
+
+    # -------------------------------------------------------- notices
+    def show_crash_notice(self, reports) -> None:
+        from .welcome import CrashNotice
+
+        CrashNotice(reports, self).exec()
+
+    def show_welcome(self):
+        from .welcome import WelcomeDialog
+
+        dlg = WelcomeDialog(self.settings, self.library, self)
+        dlg.exec()
+        self.settings.first_run_done = True
+        self.apply_settings()
+        return dlg
+
+    # -------------------------------------------------------- updates
+    def schedule_update_check(self, delay_ms: int = 5000) -> None:
+        """At launch, at most once a day, only if enabled (Settings → System)."""
+        if self.settings.check_updates and is_due(self.settings.last_update_check):
+            QTimer.singleShot(delay_ms, self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        if self.settings.check_updates or self._manual_update_check:
+            self.updates.start()
+
+    def check_updates_now(self, on_result) -> None:
+        self._manual_update_check = on_result
+        self.updates.start()
+
+    def _update_result(self, result) -> None:
+        if result.checked:
+            self.settings.last_update_check = time.time()
+        if self._manual_update_check is not None:
+            callback, self._manual_update_check = self._manual_update_check, None
+            callback(result)
+        if result.release is not None:
+            log.info("update available: %s", result.release.version)
+            url = result.release.url
+            self.overlay.toast.show_message(f"{APP_NAME} {result.release.version} is available", "Download",
+                                            lambda: QDesktopServices.openUrl(QUrl(url)), ms=15000)
+            self.overlay._place_floating()
+        elif result.error:
+            log.info("update check failed: %s", result.error)
+
+    def shutdown_services(self) -> None:
+        self.previews.shutdown()
+        self.desktop.close()
+
     # ============================================================ shutdown
     def closeEvent(self, e: QCloseEvent) -> None:
         busy = [j for j in self.converter.jobs if j.state in (JobState.QUEUED, JobState.RUNNING) and not j.live]
@@ -1001,9 +1345,9 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self.finish_jobs()
+        self.save_window_state()
         if self.isFullScreen():
             self.showNormal()
-        self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.overlay.hide()
         self.quick.hide()
         self.effects_panel.hide()

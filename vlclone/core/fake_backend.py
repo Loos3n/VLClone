@@ -263,15 +263,18 @@ class FakeBackend(MediaBackend):
     def media_info(self) -> MediaInfo:
         if not self.mrl:
             return MediaInfo()
+        from .media_sources import AUDIO_EXTENSIONS, extension
+
+        streams = [StreamInfo("audio", "MPEG AAC Audio (mp4a)", language="English", channels=2, sample_rate=48000)]
+        if extension(self.mrl) not in AUDIO_EXTENSIONS:  # audio files have no picture, like in libVLC
+            streams.insert(0, StreamInfo("video", "H264 - MPEG-4 AVC (part 10) (h264)", width=1920, height=1080,
+                                         fps=23.976))
         return MediaInfo(
             mrl=self.mrl,
             title="",
             duration_ms=self.length(),
             meta={"Title": self.mrl.rsplit("/", 1)[-1]},
-            streams=[
-                StreamInfo("video", "H264 - MPEG-4 AVC (part 10) (h264)", width=1920, height=1080, fps=23.976),
-                StreamInfo("audio", "MPEG AAC Audio (mp4a)", language="English", channels=2, sample_rate=48000),
-            ],
+            streams=streams,
             input_bitrate_kbps=4500.0,
             demux_bitrate_kbps=4400.0,
         )

@@ -202,6 +202,8 @@ class CrashGuard:
         if self._fault_file is not None:
             try:
                 faulthandler.disable()
+                if sys.stderr is not None:
+                    faulthandler.enable(sys.stderr)
                 self._fault_file.close()
             except (OSError, ValueError):
                 pass
