@@ -7,6 +7,7 @@ logic deterministic to test.
 from __future__ import annotations
 
 from .backend import MediaBackend, MediaInfo, PlaybackState, StreamInfo, Track
+from .effects import EngineFilters
 
 
 class FakeBackend(MediaBackend):
@@ -34,8 +35,13 @@ class FakeBackend(MediaBackend):
         self.loads: list[str] = []
         self.frames_stepped = 0
         self.handle: int | None = None
-        self.pending_rotation = 0
-        self.rotation = 0
+        self.pending_filters = EngineFilters()
+        self.filters = EngineFilters()  # what the current media was loaded with
+        self.equalizer: tuple[float, list[float]] | None = None
+        self.stereo_mode = 1
+        self.adjust: dict[str, float] | None = None
+        self.normalization = (False, 2.0)
+        self.normalization_supported = True
 
     # helpers for tests
     def advance(self, ms: int) -> None:
@@ -54,7 +60,7 @@ class FakeBackend(MediaBackend):
     def load(self, mrl: str, options: list[str] | None = None) -> None:
         self.mrl = mrl
         self.options = list(options or [])
-        self.rotation = self.pending_rotation
+        self.filters = self.pending_filters
         self.loads.append(mrl)
         self._state = PlaybackState.IDLE
         self._time = 0
@@ -166,8 +172,29 @@ class FakeBackend(MediaBackend):
         self.snapshots.append(path)
         return True
 
-    def set_rotation(self, degrees: int) -> None:
-        self.pending_rotation = degrees
+    def set_engine_filters(self, filters: EngineFilters) -> None:
+        self.pending_filters = filters
+
+    @property
+    def rotation(self) -> int:
+        """Rotation implied by the loaded transform (for phase-1 tests)."""
+        return {"90": 90, "180": 180, "270": 270}.get(self.filters.transform or "", 0)
+
+    def set_equalizer(self, preamp: float | None, bands: list[float] | None = None) -> None:
+        self.equalizer = None if preamp is None else (preamp, list(bands or []))
+
+    def set_stereo_mode(self, mode: int) -> None:
+        self.stereo_mode = mode
+
+    def set_video_adjust(self, values: dict[str, float] | None) -> None:
+        self.adjust = None if values is None else dict(values)
+
+    @property
+    def supports_normalization(self) -> bool:
+        return self.normalization_supported
+
+    def set_normalization(self, enabled: bool, level: float) -> None:
+        self.normalization = (enabled, level)
 
     def media_info(self) -> MediaInfo:
         if not self.mrl:

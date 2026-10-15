@@ -13,6 +13,9 @@ from pathlib import Path
 
 from .abloop import ABLoop, ABState
 from .backend import MediaBackend, PlaybackState, Track, VideoOptions
+from .effects import (ADJUST_RANGES, EQ_BANDS, NORMALIZE_MAX, NORMALIZE_MIN, SHARPEN_MAX, SHARPEN_MIN,
+                      STEREO_MODE_VALUES, STEREO_MODES, AudioEffects, Debouncer, Effects, EffectsStore,
+                      EngineFilters, EqPresetStore, VideoEffects, clamp_db, clean_bands, engine_filters)
 from .events import Signal
 from .m3u import read_m3u
 from .media_sources import expand_inputs, is_playlist_file, mrl_to_path, path_to_mrl
@@ -39,12 +42,17 @@ def zoom_label(z: float) -> str:
 
 class PlayerController:
     RESUME_SAVE_INTERVAL_S = 10.0
+    #: Quiet period before load-time filters (rotate, flip, sharpen) reload the media.
+    RELOAD_DEBOUNCE_S = 0.6
 
     def __init__(self, backend: MediaBackend, settings: Settings | None = None,
-                 resume_store: ResumeStore | None = None) -> None:
+                 resume_store: ResumeStore | None = None, effects_store: EffectsStore | None = None,
+                 eq_presets: EqPresetStore | None = None, clock=_time.monotonic) -> None:
         self.backend = backend
         self.settings = settings or Settings()
         self.resume = resume_store
+        self.effects_store = effects_store
+        self.eq_preset_store = eq_presets
         self.playlist = Playlist()
         self.playlist.repeat = RepeatMode(self.settings.repeat)
         self.playlist.shuffle = self.settings.shuffle
@@ -68,6 +76,17 @@ class PlayerController:
         self._external_subtitles: list[str] = []
         self._restore_tracks: tuple[int, int] | None = None
 
+        # Effects (phase 2): self.effects is what is applied now. In "global"
+        # scope it mirrors settings.effects; in "per_file" scope it belongs to
+        # the current file and new files start from the global set.
+        self.effects = Effects.from_dict(self.settings.effects)
+        self.reload_debounce = Debouncer(self.RELOAD_DEBOUNCE_S, clock)
+        self._loaded_filters = EngineFilters()
+        self._builtin_eq: dict[str, tuple[float, list[float]]] | None = None
+        # Live effects the engine has been given a non-default value for. libVLC
+        # keeps them on the player across media, so these must always be re-sent.
+        self._live_touched: set[str] = set()
+
         # Signals (UI subscribes)
         self.state_changed = Signal()      # (PlaybackState)
         self.media_changed = Signal()      # (PlaylistItem | None)
@@ -83,6 +102,8 @@ class PlayerController:
         self.resumed = Signal()            # (position_ms)
         self.osd = Signal()                # (text)
         self.error = Signal()              # (text)
+        self.effects_changed = Signal()    # (Effects)
+        self.reload_pending = Signal()     # (bool) load-time filters waiting to apply
 
     # =============================================================== state
     @property
@@ -150,7 +171,12 @@ class PlayerController:
             self._restore_tracks = (self.backend.audio_track(), self.backend.subtitle_track())
         else:
             self._restore_tracks = None
-        self.backend.set_rotation(self.video.rotation)
+            self._switch_effects_for(item.mrl)
+        if self.reload_debounce.pending:
+            self.reload_debounce.cancel()
+            self.reload_pending.emit(False)
+        self._loaded_filters = self.current_engine_filters()
+        self.backend.set_engine_filters(self._loaded_filters)
         self.backend.load(item.mrl)
         if not reload:
             self.ab.clear()
@@ -452,13 +478,39 @@ class PlayerController:
         self.video.rotation = degrees
         self.video_changed.emit(self.video)
         self.osd.emit(f"Rotation: {degrees}°")
-        if self.has_media:
-            # libVLC applies the transform filter at load time: reload in place.
-            was_paused = self.backend.state() is PlaybackState.PAUSED
-            position = self.backend.time()
-            self._start_current(seek_to=max(0, position), reload=True)
-            if was_paused:
-                self._pause_after_start = True
+        # libVLC applies the transform filter at load time: reload in place.
+        self._request_reload()
+
+    # ------------------------------------------- reload-with-position (filters)
+    def current_engine_filters(self) -> EngineFilters:
+        return engine_filters(self.video.rotation, self.effects.video)
+
+    @property
+    def reload_needed(self) -> bool:
+        """Load-time filters differ from what the playing media was loaded with."""
+        return self.has_media and self.current_engine_filters() != self._loaded_filters
+
+    def _request_reload(self) -> None:
+        """Batch load-time filter changes: one reload after a short quiet period."""
+        if not self.has_media:
+            return  # applied when the next media loads
+        self.reload_debounce.request()
+        self.reload_pending.emit(True)
+
+    def apply_pending_reload(self) -> None:
+        """Apply batched filter changes now instead of waiting for the debounce."""
+        if self.reload_debounce.flush():
+            self._reload_in_place()
+
+    def _reload_in_place(self) -> None:
+        self.reload_pending.emit(False)
+        if not self.reload_needed:
+            return  # e.g. flipped twice: nothing to do
+        was_paused = self.backend.state() is PlaybackState.PAUSED
+        position = self.backend.time()
+        self._start_current(seek_to=max(0, position), reload=True)
+        if was_paused:
+            self._pause_after_start = True
 
     def rotate(self) -> None:
         self.set_rotation(cycle(ROTATIONS, self.video.rotation))
@@ -497,9 +549,255 @@ class PlayerController:
         self.error.emit("Snapshot failed")
         return None
 
+    # ================================================================ effects
+    # --- scope / persistence
+    def _per_file(self) -> bool:
+        return self.settings.effects_scope == "per_file" and self.effects_store is not None
+
+    def _effects_owner(self) -> str | None:
+        """MRL whose per-file effects are being edited, or None for the global set."""
+        item = self.playlist.current
+        return item.mrl if self._per_file() and item is not None else None
+
+    def _switch_effects_for(self, mrl: str) -> None:
+        if not self._per_file():
+            return
+        fx = self.effects_store.get(mrl) or Effects.from_dict(self.settings.effects)
+        if fx.to_dict() != self.effects.to_dict():
+            self.effects = fx
+            self.effects_changed.emit(self.effects)
+
+    def _store_effects(self) -> None:
+        owner = self._effects_owner()
+        if owner is not None:
+            self.effects_store.put(owner, self.effects)
+        else:
+            self.settings.effects = self.effects.to_dict()
+
+    def set_effects_scope(self, scope: str) -> None:
+        """Switch between one global effect set and per-file effects."""
+        if scope not in ("global", "per_file") or scope == self.settings.effects_scope:
+            return
+        if scope == "per_file":
+            self.settings.effects = self.effects.to_dict()  # current set becomes the default
+            self.settings.effects_scope = scope
+            return
+        self.settings.effects_scope = scope
+        self._replace_effects(Effects.from_dict(self.settings.effects))
+
+    def _replace_effects(self, fx: Effects) -> None:
+        self.effects = fx
+        self._apply_live_effects()
+        self.effects_changed.emit(self.effects)
+        if self.reload_needed:
+            self._request_reload()
+
+    def _effects_edited(self, reload: bool = False, osd: str | None = None) -> None:
+        self._store_effects()
+        self.effects_changed.emit(self.effects)
+        if osd:
+            self.osd.emit(osd)
+        if reload:
+            self._request_reload()
+
+    def _apply_live_effects(self, initial: bool = False) -> None:
+        """Send all live effects to the engine.
+
+        ``initial`` (media just started) skips features still at their default
+        that the engine has never been changed for: in particular forcing
+        "stereo" on every file would downmix surround audio.
+        """
+        a, v = self.effects.audio, self.effects.video
+        if a.eq_enabled:
+            self._live_touched.add("eq")
+        if a.stereo_mode != "stereo":
+            self._live_touched.add("stereo")
+        if a.normalize:
+            self._live_touched.add("normalize")
+        if v.adjust_active:
+            self._live_touched.add("adjust")
+
+        def send(feature: str) -> bool:
+            return not initial or feature in self._live_touched
+
+        if send("eq"):
+            self._push_equalizer()
+        if send("stereo"):
+            self.backend.set_stereo_mode(STEREO_MODE_VALUES[a.stereo_mode])
+        if send("normalize") and self.backend.supports_normalization:
+            self.backend.set_normalization(a.normalize, a.normalize_level)
+        if send("adjust"):
+            self.backend.set_video_adjust(v.adjust_values() if v.adjust_active else None)
+
+    # --- equalizer (live)
+    def builtin_eq_presets(self) -> dict[str, tuple[float, list[float]]]:
+        if self._builtin_eq is None:
+            self._builtin_eq = self.backend.equalizer_presets()
+        return self._builtin_eq
+
+    def custom_eq_presets(self) -> list[str]:
+        return self.eq_preset_store.names() if self.eq_preset_store else []
+
+    def _push_equalizer(self) -> None:
+        a = self.effects.audio
+        self._live_touched.add("eq")
+        if a.eq_enabled:
+            self.backend.set_equalizer(a.eq_preamp, list(a.eq_bands))
+        else:
+            self.backend.set_equalizer(None)
+
+    def set_eq_enabled(self, enabled: bool) -> None:
+        a = self.effects.audio
+        a.eq_enabled = bool(enabled)
+        self._push_equalizer()
+        label = a.eq_preset or "Custom"
+        self._effects_edited(osd=f"Equalizer: {label}" if enabled else "Equalizer off")
+
+    def set_eq_band(self, index: int, gain_db: float) -> None:
+        a = self.effects.audio
+        if not 0 <= index < EQ_BANDS:
+            return
+        a.eq_bands[index] = clamp_db(gain_db)
+        a.eq_preset = ""
+        a.eq_enabled = True
+        self._push_equalizer()
+        self._effects_edited()
+
+    def set_eq_preamp(self, gain_db: float) -> None:
+        a = self.effects.audio
+        a.eq_preamp = clamp_db(gain_db)
+        a.eq_preset = ""
+        a.eq_enabled = True
+        self._push_equalizer()
+        self._effects_edited()
+
+    def apply_eq_preset(self, name: str) -> bool:
+        """Load a built-in or saved preset (and switch the equalizer on)."""
+        preset = self.builtin_eq_presets().get(name)
+        if preset is None and self.eq_preset_store:
+            preset = self.eq_preset_store.get(name)
+        if preset is None:
+            return False
+        a = self.effects.audio
+        a.eq_preamp, a.eq_bands = clamp_db(preset[0]), clean_bands(preset[1])
+        a.eq_preset = name
+        a.eq_enabled = True
+        self._push_equalizer()
+        self._effects_edited(osd=f"Equalizer: {name}")
+        return True
+
+    def save_eq_preset(self, name: str) -> str:
+        """Save the current bands as a user preset; raises ValueError on bad names."""
+        if not self.eq_preset_store:
+            raise ValueError("Presets cannot be saved")
+        a = self.effects.audio
+        if name.strip().lower() in {n.lower() for n in self.builtin_eq_presets()}:
+            raise ValueError(f"“{name.strip()}” is a built-in preset name")
+        saved = self.eq_preset_store.save(name, a.eq_preamp, a.eq_bands)
+        a.eq_preset = saved
+        self._effects_edited(osd=f"Preset saved: {saved}")
+        return saved
+
+    def delete_eq_preset(self, name: str) -> bool:
+        if not (self.eq_preset_store and self.eq_preset_store.delete(name)):
+            return False
+        if self.effects.audio.eq_preset == name:
+            self.effects.audio.eq_preset = ""
+        self._effects_edited(osd=f"Preset deleted: {name}")
+        return True
+
+    # --- other audio effects (live)
+    def set_normalization(self, enabled: bool) -> None:
+        a = self.effects.audio
+        a.normalize = bool(enabled)
+        self._live_touched.add("normalize")
+        if self.backend.supports_normalization:
+            self.backend.set_normalization(a.normalize, a.normalize_level)
+        self._effects_edited(osd="Volume normalization on" if enabled else "Volume normalization off")
+
+    def set_normalization_level(self, level: float) -> None:
+        a = self.effects.audio
+        a.normalize_level = round(float(clamp(level, NORMALIZE_MIN, NORMALIZE_MAX)), 1)
+        if a.normalize and self.backend.supports_normalization:
+            self.backend.set_normalization(True, a.normalize_level)
+        self._effects_edited()
+
+    def set_stereo_mode(self, key: str) -> None:
+        if key not in STEREO_MODE_VALUES:
+            return
+        self.effects.audio.stereo_mode = key
+        self._live_touched.add("stereo")
+        self.backend.set_stereo_mode(STEREO_MODE_VALUES[key])
+        label = next(lbl for k, lbl, _ in STEREO_MODES if k == key)
+        self._effects_edited(osd=f"Audio: {label}")
+
+    def reset_audio_effects(self) -> None:
+        self.effects.audio = AudioEffects()
+        self._apply_live_effects()
+        self._effects_edited(osd="Audio effects reset")
+
+    # --- video effects
+    def set_adjust(self, name: str, value: float) -> None:
+        """Brightness, contrast, hue, saturation or gamma (live)."""
+        if name not in ADJUST_RANGES:
+            return
+        lo, hi, _ = ADJUST_RANGES[name]
+        v = self.effects.video
+        setattr(v, name, round(float(clamp(value, lo, hi)), 3))
+        self._live_touched.add("adjust")
+        self.backend.set_video_adjust(v.adjust_values() if v.adjust_active else None)
+        self._effects_edited()
+
+    def reset_adjust(self, name: str | None = None) -> None:
+        v = self.effects.video
+        for n in ([name] if name else list(ADJUST_RANGES)):
+            if n in ADJUST_RANGES:
+                setattr(v, n, ADJUST_RANGES[n][2])
+        self._live_touched.add("adjust")
+        self.backend.set_video_adjust(v.adjust_values() if v.adjust_active else None)
+        self._effects_edited()
+
+    def set_flip(self, horizontal: bool | None = None, vertical: bool | None = None) -> None:
+        """Mirror the picture (applied by reloading the media)."""
+        v = self.effects.video
+        if horizontal is not None:
+            v.flip_h = bool(horizontal)
+        if vertical is not None:
+            v.flip_v = bool(vertical)
+        parts = [p for p, on in (("horizontal", v.flip_h), ("vertical", v.flip_v)) if on]
+        self._effects_edited(reload=True, osd="Flip: " + (" + ".join(parts) if parts else "off"))
+
+    def toggle_flip_horizontal(self) -> None:
+        self.set_flip(horizontal=not self.effects.video.flip_h)
+
+    def toggle_flip_vertical(self) -> None:
+        self.set_flip(vertical=not self.effects.video.flip_v)
+
+    def set_sharpen(self, enabled: bool) -> None:
+        self.effects.video.sharpen = bool(enabled)
+        self._effects_edited(reload=True, osd="Sharpen on" if enabled else "Sharpen off")
+
+    def set_sharpen_strength(self, strength: float) -> None:
+        v = self.effects.video
+        v.sharpen_strength = round(float(clamp(strength, SHARPEN_MIN, SHARPEN_MAX)), 2)
+        self._effects_edited(reload=v.sharpen)
+
+    def reset_video_effects(self) -> None:
+        self.effects.video = VideoEffects()
+        self._apply_live_effects()
+        self._effects_edited(reload=True, osd="Video effects reset")
+
+    def reset_all_effects(self) -> None:
+        """Every audio and video effect back to neutral (geometry like crop/zoom untouched)."""
+        self.effects = Effects()
+        self._apply_live_effects()
+        self._effects_edited(reload=True, osd="All effects reset")
+
     # =================================================================== loop
     def tick(self) -> None:
         """Poll the backend; call ~5-10 times a second from the UI thread."""
+        if self.reload_debounce.poll():
+            self._reload_in_place()
         st = self.backend.state()
         if st is PlaybackState.PLAYING and not self._started:
             self._on_started()
@@ -533,6 +831,7 @@ class PlayerController:
         if abs(self.rate - 1.0) > 1e-6:
             self.backend.set_rate(self.rate)
         self._apply_video_options()
+        self._apply_live_effects(initial=True)
         if self.audio_delay:
             self.backend.set_audio_delay(self.audio_delay)
         if self.subtitle_delay:
@@ -612,12 +911,15 @@ class PlayerController:
 
     def _save_resume(self) -> None:
         self._last_resume_save = _time.monotonic()
-        if self.resume:
-            try:
-                self.resume.save()
-            except OSError:
-                pass
+        for store in (self.resume, self.effects_store):
+            if store:
+                try:
+                    store.save()
+                except OSError:
+                    pass
 
     def shutdown(self) -> None:
         self._remember_position()
+        self._store_effects()
+        self._save_resume()
         self.backend.release()

@@ -16,6 +16,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .effects import BUILTIN_EQ_PRESETS, EngineFilters
+
 
 class PlaybackState(str, Enum):
     IDLE = "idle"
@@ -189,5 +191,26 @@ class MediaBackend(ABC):
     def engine_version(self) -> str: ...
 
     # --- optional capabilities (defaults keep older backends working)
-    def set_rotation(self, degrees: int) -> None:
-        """Rotation (0/90/180/270) applied from the next :meth:`load` on."""
+    def set_engine_filters(self, filters: EngineFilters) -> None:
+        """Load-time video filters (rotate/flip, sharpen) used from the next :meth:`load` on."""
+
+    # --- effects (phase 2). Live: they act on the playing media immediately.
+    def equalizer_presets(self) -> dict[str, tuple[float, list[float]]]:
+        """Built-in equalizer presets: name -> (preamp dB, 10 band gains dB)."""
+        return {name: (pre, list(bands)) for name, (pre, bands) in BUILTIN_EQ_PRESETS.items()}
+
+    def set_equalizer(self, preamp: float | None, bands: list[float] | None = None) -> None:
+        """Enable the 10-band equalizer, or disable it with ``preamp=None``."""
+
+    def set_stereo_mode(self, mode: int) -> None:
+        """libVLC stereo mode: 1 stereo, 2 reverse, 3 left, 4 right, 7 mono."""
+
+    def set_video_adjust(self, values: dict[str, float] | None) -> None:
+        """Brightness/contrast/hue/saturation/gamma, or ``None`` to switch adjust off."""
+
+    @property
+    def supports_normalization(self) -> bool:
+        return False
+
+    def set_normalization(self, enabled: bool, level: float) -> None:
+        """Volume normalizer (VLC's "normvol" filter) with its maximum level."""

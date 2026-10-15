@@ -30,6 +30,11 @@ class Settings:
     pause_on_click: bool = False
     play_on_open: bool = True
     recursive_folders: bool = True
+    restore_playlist: bool = True
+
+    # Effects ("global": one set for everything, "per_file": each file remembers its own)
+    effects_scope: str = "global"
+    effects: dict = field(default_factory=dict)
 
     # Interface
     controls_hide_delay_ms: int = 2200
@@ -88,6 +93,8 @@ class Settings:
             self.snapshot_format = "png"
         if self.repeat not in ("none", "all", "one"):
             self.repeat = "none"
+        if self.effects_scope not in ("global", "per_file"):
+            self.effects_scope = "global"
 
     def save(self, path: Path | None = None) -> None:
         save_json(path or default_path(), asdict(self))

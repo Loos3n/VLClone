@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import APP_NAME, __version__
     from .core.controller import PlayerController
+    from .core.effects import EffectsStore, EqPresetStore
     from .core.resume import ResumeStore
+    from .core.session import clear_saved_playlist, restore_playlist, save_playlist
     from .core.settings import Settings
     from .ui.main_window import MainWindow
     from .ui.theme import apply_theme
@@ -74,13 +76,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     resume = ResumeStore(min_position_ms=settings.resume_min_seconds * 1000)
-    controller = PlayerController(backend, settings, resume)
+    controller = PlayerController(backend, settings, resume, EffectsStore(), EqPresetStore())
+    if settings.restore_playlist:
+        restore_playlist(controller.playlist)
     window = MainWindow(controller, settings)
     window.show()
     if args.inputs:
         controller.open(args.inputs)
 
     code = app.exec()
+    try:
+        if settings.restore_playlist:
+            save_playlist(controller.playlist)
+        else:
+            clear_saved_playlist()
+    except OSError:
+        pass
     controller.shutdown()
     try:
         settings.save()

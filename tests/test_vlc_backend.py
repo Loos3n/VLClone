@@ -87,18 +87,23 @@ def test_subtitle_slave(backend, sample, tmp_path):
     assert wait_for(lambda: any(t.id != -1 for t in backend.subtitle_tracks()))
 
 
-def test_rotation_swaps_instance_and_plays(backend, sample):
+def test_engine_filters_swap_instance_and_play(backend, sample):
+    from vlclone.core.effects import EngineFilters
+
     backend.set_volume(80)
-    backend.set_rotation(90)
+    rotated = EngineFilters(transform="90")
+    backend.set_engine_filters(rotated)
     backend.load(path_to_mrl(str(sample)))
     backend.play()
     assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
-    assert backend._player_rotation == 90
-    backend.set_rotation(0)
-    backend.load(path_to_mrl(str(sample)))
-    backend.play()
-    assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
-    assert backend._player_rotation == 0
+    assert backend._player_filters == rotated
+    for filters in (EngineFilters("hflip", 1.0), EngineFilters(None, 0.5), EngineFilters()):
+        backend.set_engine_filters(filters)
+        backend.load(path_to_mrl(str(sample)))
+        backend.play()
+        assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
+        assert backend._player_filters == filters
+    assert len(backend._instances) <= backend.MAX_INSTANCES
 
 
 def test_controller_auto_advances_and_plays_http(backend, sample, tmp_path):
@@ -135,3 +140,37 @@ def test_controller_auto_advances_and_plays_http(backend, sample, tmp_path):
         assert ctl.backend.media_info().mrl == url
     finally:
         server.shutdown()
+
+
+def test_live_effects_on_real_engine(backend, sample):
+    from vlclone.core.effects import BUILTIN_EQ_PRESETS
+
+    presets = backend.equalizer_presets()
+    assert presets["Rock"] == BUILTIN_EQ_PRESETS["Rock"]  # our table matches the engine
+    backend.load(path_to_mrl(str(sample)))
+    backend.play()
+    assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
+    backend.set_equalizer(5.0, [1.0] * 10)
+    backend.set_stereo_mode(7)
+    assert backend.vlc.libvlc_audio_get_channel(backend.player) == 7
+    backend.set_video_adjust({"brightness": 1.4, "contrast": 1.2, "hue": 30, "saturation": 1.5, "gamma": 1.1})
+    opt = backend.vlc.VideoAdjustOption
+    assert abs(backend.player.video_get_adjust_float(opt.Brightness) - 1.4) < 1e-3
+    assert backend._adjust_on
+    backend.set_video_adjust(None)  # libVLC 3 can't report the enable flag back
+    assert not backend._adjust_on
+    backend.set_equalizer(None)
+    assert backend.state() is PlaybackState.PLAYING
+
+
+def test_normalization_hook_on_real_engine(backend, sample):
+    assert backend.supports_normalization  # libVLC 3.0 + libvlccore found
+    backend.load(path_to_mrl(str(sample)))
+    backend.play()
+    assert wait_for(lambda: backend.state() is PlaybackState.PLAYING)
+    hook = backend._aout_hook
+    assert hook.set_chain(backend.player, "normvol", 3.0)
+    backend.set_normalization(True, 3.0)
+    backend.set_equalizer(2.0, [0.5] * 10)  # must keep normvol in the chain
+    backend.set_normalization(False, 3.0)
+    assert backend.state() is PlaybackState.PLAYING

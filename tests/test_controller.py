@@ -234,6 +234,8 @@ def test_video_cycles_and_rotation_reload(ctl):
     assert ctl.backend.crop == "16:9" and ctl.backend.zoom == 0.25 and ctl.backend.deinterlace == "blend"
     ctl.seek(40_000)
     ctl.rotate()
+    assert ctl.backend.rotation == 0  # batched: reloads after a short pause
+    ctl.apply_pending_reload()
     assert ctl.backend.rotation == 90
     ctl.tick()
     assert ctl.time() == 40_000  # reloaded and restored position
@@ -287,6 +289,7 @@ def test_rotation_reload_keeps_subtitles_tracks_and_delays(ctl):
     ctl.seek(10_000)
     ctl.toggle_ab()
     ctl.rotate()
+    ctl.apply_pending_reload()
     # the fake backend forgets slaves on reload, like libVLC
     ctl.backend._subs = ctl.backend._subs[:2]
     ctl.backend._audio = 1
@@ -302,5 +305,6 @@ def test_rotate_while_paused_stays_paused(ctl):
     ctl.tick()
     ctl.pause()
     ctl.rotate()
+    ctl.apply_pending_reload()
     ctl.tick()
     assert ctl.backend.state() is PlaybackState.PAUSED

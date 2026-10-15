@@ -10,7 +10,10 @@ import os
 import struct
 import sys
 
+from collections import OrderedDict
+
 from .backend import MediaBackend, MediaInfo, PlaybackState, StreamInfo, Track
+from .effects import EQ_BANDS, EngineFilters
 
 
 class LibVlcNotFound(RuntimeError):
@@ -161,6 +164,100 @@ def _read_tracks(vlc, media) -> list[dict]:
     return tracks
 
 
+class _AoutFilterHook:
+    """Set the audio filter chain on a player's audio output (for "normvol").
+
+    libVLC's public API routes the whole audio-filter chain through its
+    equalizer call, so volume normalization has no public switch. This uses
+    libvlccore's exported variable API instead, on the audio-output child of
+    the media player, exactly like VLC's own interface does. The object and
+    list layouts used here are part of libvlccore's frozen 3.0.x plugin ABI;
+    the hook only enables itself on libVLC 3.0 and fails closed otherwise.
+    """
+
+    VLC_VAR_STRING = 0x0040
+    VLC_VAR_FLOAT = 0x0050
+
+    class _Value(ctypes.Union):
+        _fields_ = [("i", ctypes.c_int64), ("f", ctypes.c_float), ("s", ctypes.c_char_p),
+                    ("p", ctypes.c_void_p)]
+
+    class _List(ctypes.Structure):  # vlc_list_t
+        _fields_ = [("type", ctypes.c_int), ("count", ctypes.c_int), ("values", ctypes.c_void_p)]
+
+    def __init__(self, vlc) -> None:
+        self.core = None
+        try:
+            if not _decode(vlc.libvlc_get_version()).startswith("3.0"):
+                return
+            core = self._load_core(vlc)
+            if core is None:
+                return
+            core.vlc_list_children.restype = ctypes.POINTER(self._List)
+            core.vlc_list_children.argtypes = [ctypes.c_void_p]
+            core.vlc_list_release.restype = None
+            core.vlc_list_release.argtypes = [ctypes.POINTER(self._List)]
+            core.var_Create.restype = ctypes.c_int
+            core.var_Create.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            core.var_SetChecked.restype = ctypes.c_int
+            core.var_SetChecked.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, self._Value]
+            core.var_Type.restype = ctypes.c_int
+            core.var_Type.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            self.core = core
+        except Exception:
+            self.core = None
+
+    @staticmethod
+    def _load_core(vlc):
+        names = ["libvlccore.dll", "libvlccore.so.9", "libvlccore.dylib"]
+        folder = os.path.dirname(getattr(vlc.dll, "_name", "") or "")
+        candidates = [os.path.join(folder, n) for n in names if folder] + names
+        import ctypes.util
+
+        found = ctypes.util.find_library("vlccore")
+        if found:
+            candidates.append(found)
+        for candidate in candidates:
+            try:
+                return ctypes.CDLL(candidate)
+            except OSError:
+                continue
+        return None
+
+    @property
+    def available(self) -> bool:
+        return self.core is not None
+
+    def set_chain(self, player, chain: str, level: float) -> bool:
+        """Apply ``chain`` (e.g. "equalizer:normvol") to the player's audio output."""
+        if self.core is None:
+            return False
+        core = self.core
+        handle = ctypes.cast(player._as_parameter_, ctypes.c_void_p)
+        lst = core.vlc_list_children(handle)
+        if not lst:
+            return False
+        try:
+            count = lst.contents.count
+            if not 0 <= count <= 64 or not lst.contents.values:
+                return False
+            values = ctypes.cast(lst.contents.values, ctypes.POINTER(self._Value))
+            for k in range(count):
+                obj = values[k].p
+                if not obj:
+                    continue
+                kind = ctypes.cast(obj, ctypes.POINTER(ctypes.c_char_p))[0]  # obj->object_type
+                if kind != b"audio output" or core.var_Type(obj, b"audio-filter") != self.VLC_VAR_STRING:
+                    continue
+                core.var_Create(obj, b"norm-max-level", self.VLC_VAR_FLOAT)
+                core.var_SetChecked(obj, b"norm-max-level", self.VLC_VAR_FLOAT, self._Value(f=level))
+                return core.var_SetChecked(obj, b"audio-filter", self.VLC_VAR_STRING,
+                                           self._Value(s=chain.encode())) == 0
+            return False
+        finally:
+            core.vlc_list_release(lst)
+
+
 class VlcBackend(MediaBackend):
     def __init__(self, args: list[str] | None = None) -> None:
         self.vlc = import_vlc()
@@ -169,14 +266,20 @@ class VlcBackend(MediaBackend):
             args.append("--no-xlib")  # we embed via XCB; Xlib needs XInitThreads
         self._args = args
         self.instance = self._new_instance(args)
-        # libVLC only honours video filters at instance level, so each
-        # rotation gets its own (lazily created, cached) instance.
-        self._instances = {0: self.instance}
-        self._rotation = 0
-        self._player_rotation = 0
+        # libVLC only honours video filters (rotate/flip, sharpen) at instance
+        # level, so each filter set gets its own instance, created lazily and
+        # kept in a small LRU cache so toggling back and forth is fast.
+        self._instances: OrderedDict[EngineFilters, object] = OrderedDict({EngineFilters(): self.instance})
+        self._filters = EngineFilters()
+        self._player_filters = EngineFilters()
         self._handle: int | None = None
         self.player = self._new_player()
         self._media = None
+        self._eq = None
+        self._eq_on = False
+        self._normalize = (False, 2.0)
+        self._adjust_on = False
+        self._aout_hook = _AoutFilterHook(self.vlc)
         self._states = {
             self.vlc.State.NothingSpecial: PlaybackState.IDLE,
             self.vlc.State.Opening: PlaybackState.OPENING,
@@ -223,34 +326,47 @@ class VlcBackend(MediaBackend):
         try:
             self.player.stop()
             self.player.release()
+            if self._eq is not None:
+                self.vlc.libvlc_audio_equalizer_release(self._eq)
+                self._eq = None
             for instance in self._instances.values():
                 instance.release()
         except Exception:
             pass
 
-    def set_rotation(self, degrees: int) -> None:
-        self._rotation = int(degrees) % 360
+    MAX_INSTANCES = 3
 
-    def _swap_player_for_rotation(self) -> None:
-        rotation = self._rotation
-        instance = self._instances.get(rotation)
+    def set_engine_filters(self, filters: EngineFilters) -> None:
+        self._filters = filters
+
+    def _swap_player_for_filters(self) -> None:
+        filters = self._filters
+        instance = self._instances.get(filters)
         if instance is None:
-            instance = self._new_instance(
-                self._args + ["--video-filter=transform", f"--transform-type={rotation}"])
-            self._instances[rotation] = instance
+            instance = self._new_instance(self._args + filters.vlc_args())
+            self._instances[filters] = instance
+        self._instances.move_to_end(filters)
         volume = self.player.audio_get_volume()
         self.player.stop()
         self.player.release()
+        if self._media is not None:
+            self._media.release()
+            self._media = None
         self.instance = instance
         self.player = self._new_player()
+        self._adjust_on = False
         if volume >= 0:
             self.player.audio_set_volume(volume)
-        self._player_rotation = rotation
+        self._player_filters = filters
+        # Evict the least recently used instances (never the plain or current one).
+        while len(self._instances) > self.MAX_INSTANCES:
+            victim = next(k for k in self._instances if k not in (filters, EngineFilters()))
+            self._instances.pop(victim).release()
 
     # ---------------------------------------------------------------- media
     def load(self, mrl: str, options: list[str] | None = None) -> None:
-        if self._rotation != self._player_rotation:
-            self._swap_player_for_rotation()
+        if self._filters != self._player_filters:
+            self._swap_player_for_filters()
         media = self.instance.media_new(mrl)
         for opt in options or []:
             media.add_option(opt)
@@ -370,6 +486,77 @@ class VlcBackend(MediaBackend):
 
     def take_snapshot(self, path: str) -> bool:
         return self.player.video_take_snapshot(0, path, 0, 0) == 0
+
+    # -------------------------------------------------------------- effects
+    def equalizer_presets(self) -> dict[str, tuple[float, list[float]]]:
+        vlc = self.vlc
+        try:
+            presets = {}
+            for index in range(vlc.libvlc_audio_equalizer_get_preset_count()):
+                name = _decode(vlc.libvlc_audio_equalizer_get_preset_name(index))
+                eq = vlc.libvlc_audio_equalizer_new_from_preset(index)
+                try:
+                    preamp = round(vlc.libvlc_audio_equalizer_get_preamp(eq), 1)
+                    bands = [round(vlc.libvlc_audio_equalizer_get_amp_at_index(eq, b), 1) + 0.0
+                             for b in range(EQ_BANDS)]
+                finally:
+                    vlc.libvlc_audio_equalizer_release(eq)
+                presets[name] = (preamp, bands)
+            return presets or super().equalizer_presets()
+        except Exception:
+            return super().equalizer_presets()
+
+    def set_equalizer(self, preamp: float | None, bands: list[float] | None = None) -> None:
+        vlc = self.vlc
+        if preamp is None:
+            self._eq_on = False
+            self.player.set_equalizer(None)
+        else:
+            if self._eq is None:
+                self._eq = vlc.libvlc_audio_equalizer_new()
+            vlc.libvlc_audio_equalizer_set_preamp(self._eq, float(preamp))
+            for index, gain in enumerate((bands or [])[:EQ_BANDS]):
+                vlc.libvlc_audio_equalizer_set_amp_at_index(self._eq, float(gain), index)
+            self._eq_on = True
+            self.player.set_equalizer(self._eq)
+        if self._normalize[0]:
+            # set_equalizer rewrites the audio filter chain; put normvol back.
+            self._apply_audio_chain()
+
+    def set_stereo_mode(self, mode: int) -> None:
+        self.vlc.libvlc_audio_set_channel(self.player, int(mode))
+
+    def set_video_adjust(self, values: dict[str, float] | None) -> None:
+        opt = self.vlc.VideoAdjustOption
+        if values is None:
+            if self._adjust_on:
+                self.player.video_set_adjust_int(opt.Enable, 0)
+                self._adjust_on = False
+            return
+        names = {"brightness": opt.Brightness, "contrast": opt.Contrast, "hue": opt.Hue,
+                 "saturation": opt.Saturation, "gamma": opt.Gamma}
+        for name, value in values.items():
+            if name in names:
+                self.player.video_set_adjust_float(names[name], float(value))
+        if not self._adjust_on:
+            # Enabling rebuilds the vout filter chain once; value changes are live.
+            self.player.video_set_adjust_int(opt.Enable, 1)
+            self._adjust_on = True
+
+    @property
+    def supports_normalization(self) -> bool:
+        return self._aout_hook.available
+
+    def set_normalization(self, enabled: bool, level: float) -> None:
+        was = self._normalize[0]
+        self._normalize = (bool(enabled), float(level))
+        if enabled or was:
+            self._apply_audio_chain()
+
+    def _apply_audio_chain(self) -> None:
+        enabled, level = self._normalize
+        chain = ":".join((["equalizer"] if self._eq_on else []) + (["normvol"] if enabled else []))
+        self._aout_hook.set_chain(self.player, chain, level)
 
     # ----------------------------------------------------------------- info
     def media_info(self) -> MediaInfo:
