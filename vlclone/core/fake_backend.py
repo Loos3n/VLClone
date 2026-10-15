@@ -49,6 +49,7 @@ class FakeBackend(MediaBackend):
         self.subitem_map: dict[str, list[tuple[str, str]]] = {}  # "playlist" URLs (YouTube…)
         self.fail_mrls: set[str] = set()   # go to ERROR when played
         self.hang_mrls: set[str] = set()   # stay OPENING forever
+        self.dead_mrls: set[str] = set()   # "end" without playing, like libVLC on HTTP 404
         self.navigations: list[str] = []
         self._title = 0
         self.devices = {"video": [CaptureDevice("Integrated Camera", "Integrated Camera")],
@@ -87,6 +88,8 @@ class FakeBackend(MediaBackend):
             self._time = 0
         if self.mrl in self.fail_mrls:
             self._state = PlaybackState.ERROR
+        elif self.mrl in self.dead_mrls:
+            self._state = PlaybackState.ENDED
         elif self.mrl in self.hang_mrls:
             self._state = PlaybackState.OPENING
         elif self.mrl in self.subitem_map and self._state is not PlaybackState.PAUSED:

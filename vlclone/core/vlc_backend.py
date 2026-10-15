@@ -816,19 +816,39 @@ class VlcMediaProbe:
         from .png import bgra_to_rgb, write_png
 
         vlc = self.vlc
-        info = self.probe(path)
-        if not info.width or not info.height:
-            return False
-        width = max(16, min(width, info.width)) // 2 * 2
-        height = max(2, int(round(width * info.height / info.width)) // 2 * 2)
-        pitch = width * 4
-        buf = (ctypes.c_ubyte * (pitch * height))()
-        state = {"frames": 0, "data": None}
+        try:
+            info = self.probe(path)
+        except Exception:
+            info = None
+        aspect = info.width / info.height if info and info.width and info.height else None
         lock = threading.Lock()
+        # Filled by the format callback: the decoder tells us the picture size and
+        # we ask libVLC to scale it to our width in RV32 (B, G, R, X).
+        state: dict = {"frames": 0, "data": None, "buf": None, "size": None}
+
+        @vlc.CallbackDecorators.VideoFormatCb
+        def on_format(opaque, chroma, w_ptr, h_ptr, pitches, lines):
+            src_w, src_h = w_ptr[0], h_ptr[0]
+            if not src_w or not src_h:
+                return 0
+            # Decoders may report padded sizes (240 → 256); prefer the stream's own aspect.
+            tw = max(16, min(width, src_w)) // 2 * 2
+            th = max(2, int(round(tw / (aspect or src_w / src_h))) // 2 * 2)
+            ctypes.memmove(chroma, b"RV32", 4)
+            w_ptr[0], h_ptr[0] = tw, th
+            pitches[0], lines[0] = tw * 4, th
+            with lock:
+                state["buf"] = (ctypes.c_ubyte * (tw * 4 * th))()
+                state["size"] = (tw, th)
+            return 1
+
+        @vlc.CallbackDecorators.VideoCleanupCb
+        def on_cleanup(opaque):
+            pass
 
         @vlc.CallbackDecorators.VideoLockCb
         def on_lock(opaque, planes):
-            planes[0] = ctypes.cast(buf, ctypes.c_void_p)
+            planes[0] = ctypes.cast(state["buf"], ctypes.c_void_p)
             return None
 
         @vlc.CallbackDecorators.VideoUnlockCb
@@ -839,17 +859,17 @@ class VlcMediaProbe:
         def on_display(opaque, picture):
             with lock:
                 state["frames"] += 1
-                if state["frames"] >= 2:  # the first frame after a seek can be a stale one
-                    state["data"] = bytes(buf)
+                if state["frames"] >= 2 and state["data"] is None:  # first frame after a seek can be stale
+                    state["data"] = bytes(state["buf"])
 
         player = self.instance.media_player_new()
         player.video_set_callbacks(on_lock, on_unlock, on_display, None)
-        player.video_set_format("RV32", width, height, pitch)
+        player.video_set_format_callbacks(on_format, on_cleanup)
         media = self.instance.media_new_path(path)
-        duration = duration_ms if duration_ms and duration_ms > 0 else info.duration_ms
-        if duration and duration > 0:
+        duration_ms = duration_ms if duration_ms and duration_ms > 0 else (info.duration_ms if info else -1)
+        if duration_ms and duration_ms > 0:
             # A third in, capped so long films don't need a far seek; skips black intros.
-            media.add_option(f":start-time={min(duration * 0.33, 300_000) / 1000:.2f}")
+            media.add_option(f":start-time={min(duration_ms * 0.33, 300_000) / 1000:.2f}")
         for opt in (":no-audio", ":no-spu", ":input-fast-seek"):
             media.add_option(opt)
         player.set_media(media)
@@ -867,8 +887,9 @@ class VlcMediaProbe:
             player.stop()
             player.release()
             media.release()
-        data = state["data"]
-        if data is None:
+        data, size = state["data"], state["size"]
+        if data is None or size is None:
             return False
-        write_png(out_path, width, height, bgra_to_rgb(data, width, height, pitch))
+        tw, th = size
+        write_png(out_path, tw, th, bgra_to_rgb(data, tw, th, tw * 4))
         return True

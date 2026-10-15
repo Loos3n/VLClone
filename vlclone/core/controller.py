@@ -955,6 +955,12 @@ class PlayerController:
         if st is PlaybackState.ENDED:
             if self._expand_subitems():
                 return
+            item = self.playlist.current
+            if not self._started and item is not None and mrl_to_path(item.mrl) is None:
+                # libVLC "ends" a stream it could not open (HTTP 404, refused…): an error, not the end.
+                self._set_state(PlaybackState.ERROR)
+                self._on_error()
+                return
             self._set_state(st)
             self._on_ended()
             return

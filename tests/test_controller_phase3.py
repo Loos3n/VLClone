@@ -146,6 +146,24 @@ def test_failed_stream_reports_a_clear_error(ctl):
     assert "cam.local" in errors[-1] and "connection" in errors[-1]
 
 
+def test_stream_that_ends_without_playing_is_an_error(ctl):
+    failed = []
+    ctl.open_failed.connect(lambda item, msg: failed.append(msg))
+    ctl.backend.dead_mrls.add("http://x/missing.mp4")
+    ctl.open(["http://x/missing.mp4", "http://x/next.mp4"])
+    ctl.tick()
+    assert failed and "x" in failed[0]
+    assert ctl.backend.mrl == "http://x/next.mp4"  # skipped like any failed item
+
+
+def test_local_file_end_is_not_an_error(ctl):
+    failed = []
+    ctl.open_failed.connect(lambda item, msg: failed.append(msg))
+    ctl.backend.dead_mrls.add("file:///tiny.wav")
+    start(ctl, "file:///tiny.wav")
+    assert not failed and ctl.state is PlaybackState.STOPPED
+
+
 def test_youtube_failure_mentions_the_lua_script(ctl):
     errors = []
     ctl.open_failed.connect(lambda item, msg: errors.append(msg))

@@ -70,6 +70,10 @@ jobs:
           $report = Get-Content selftest.txt -Raw
           if ($report -notmatch "playback \(filtered instance\): playing") { Write-Output "::warning::Packaged exe did not reach playing state with load-time filters" }
           if ($report -notmatch "normalization hook applied: True") { Write-Output "::warning::Volume normalization hook unavailable in the packaged build" }
+          if ($report -notmatch "chapters: 3 \(Intro, Middle, End\); jump ok") { Write-Output "::warning::Chapters were not read or chapter jump failed in the packaged build" }
+          if ($report -notmatch "http stream: playing") { Write-Output "::warning::Local HTTP stream did not play in the packaged build" }
+          if ($report -notmatch "http 404: failed as expected") { Write-Output "::warning::A missing HTTP stream was not reported as a failure" }
+          if ($report -notmatch "thumbnail True") { Write-Output "::warning::Library thumbnails (libVLC vmem) failed in the packaged build" }
 
       - name: Installer
         run: |
