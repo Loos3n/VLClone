@@ -22,6 +22,10 @@ Every push builds Windows packages with GitHub Actions
   icon, "Open with" registration, uninstaller).
 * `VLClone-<version>-win64-portable.zip`: unzip anywhere and run `VLClone.exe`.
 
+Artifacts are kept for 7 days. If the account's Actions artifact storage is
+full, run the workflow manually (*Run workflow* → tick *pre-release*) to get the
+files as a GitHub pre-release instead.
+
 Both **bundle libVLC** (from the official VLC 3.0.21 win64 build, verified by
 SHA-256), so VLC does not need to be installed. Pushing a tag like `v0.1.0`
 also attaches both files to a GitHub release. The exe is unsigned, so Windows

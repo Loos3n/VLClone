@@ -10,6 +10,10 @@ on:
       vlc_version:
         description: "VLC version to bundle"
         default: "3.0.21"
+      prerelease:
+        description: "Also publish the files as a GitHub pre-release (needs no artifact storage)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -76,17 +80,34 @@ jobs:
         run: Compress-Archive -Path dist\VLClone -DestinationPath "dist\VLClone-${{ steps.meta.outputs.version }}-win64-portable.zip"
 
       - uses: actions/upload-artifact@v4
+        # A full artifact quota should not hide a good build; the step shows
+        # as a warning and the release step below is the alternative.
+        continue-on-error: true
         with:
           name: VLClone-${{ steps.meta.outputs.version }}-windows
           path: |
             dist/VLClone-*-Setup.exe
             dist/VLClone-*-portable.zip
           if-no-files-found: error
+          retention-days: 7
+          compression-level: 0  # installer and zip are already compressed
 
-      - name: GitHub release (tags only)
+      - name: GitHub release (v* tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          files: |
+            dist/VLClone-*-Setup.exe
+            dist/VLClone-*-portable.zip
+
+      - name: GitHub pre-release (manual run)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: VLClone ${{ steps.meta.outputs.version }} (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: true
           files: |
             dist/VLClone-*-Setup.exe
             dist/VLClone-*-portable.zip
