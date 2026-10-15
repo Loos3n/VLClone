@@ -438,6 +438,31 @@ def _chapters(p, c):
         p.drawLine(QPointF(x, 8), QPointF(x, 16))
 
 
+@_icon("record")
+def _record(p, c):
+    _fill(p, c)
+    p.drawEllipse(QPointF(12, 12), 6, 6)
+
+
+@_icon("convert")
+def _convert(p, c):
+    _pen(p, c, 1.9)
+    p.drawPolyline(_poly((4, 9), (18, 9)))
+    _arrow_head(p, c, (19.5, 9), 0, 3.2)
+    p.drawPolyline(_poly((20, 15), (6, 15)))
+    _arrow_head(p, c, (4.5, 15), 180, 3.2)
+
+
+@_icon("stream")
+def _stream(p, c):
+    _fill(p, c)
+    p.drawEllipse(QPointF(12, 12), 2.2, 2.2)
+    _pen(p, c, 1.8)
+    for r in (5.5, 9.0):
+        p.drawArc(QRectF(12 - r, 12 - r, 2 * r, 2 * r), -45 * 16, 90 * 16)
+        p.drawArc(QRectF(12 - r, 12 - r, 2 * r, 2 * r), 135 * 16, 90 * 16)
+
+
 class _PaintedEngine(QIconEngine):
     def __init__(self, painter: Painter, color: QColor | None) -> None:
         super().__init__()

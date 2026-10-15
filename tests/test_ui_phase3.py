@@ -343,7 +343,7 @@ def test_library_recent_continue_and_context_menu(window, app, library, media_di
     monkeypatch.setattr(lv, "show_in_folder", shown.append)
     menu = view.build_item_menu(items)
     labels = [a.text() for a in menu.actions() if a.text()]
-    assert labels == ["Play", "Add to playlist", "Show in folder"]
+    assert labels == ["Play", "Add to playlist", "Convert / save…", "Show in folder"]
     next(a for a in menu.actions() if a.text() == "Show in folder").trigger()
     assert shown == [str(videos / "Holiday.mp4")]
     before = len(ctl.playlist)

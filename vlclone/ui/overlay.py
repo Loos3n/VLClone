@@ -190,6 +190,7 @@ class ControlsPanel(QWidget):
         add("previous", "previous", "Previous (P)")
         add("next", "next", "Next (N)")
         add("frame_step", "frame", "Next frame (E)", 34, 18)
+        add("record", "record", "Record (Shift+R)", 34, 18)
         row.addSpacing(8)
         add("mute", "volume-high", "Mute (M)", 34, 20)
         self.volume = VolumeSlider()
@@ -299,6 +300,12 @@ class OverlayWindow(QWidget):
 
         self.osd = FadingLabel(self)
         self.toast = Toast(self)
+        # Stays visible while the controls fade: you should always know you are recording.
+        self.rec = QLabel(self)
+        self.rec.setStyleSheet("background: rgba(214, 48, 58, 0.92); color: white; border-radius: 10px;"
+                               " padding: 3px 11px; font-weight: 600;")
+        self.rec.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.rec.hide()
 
         self._top_fader = Fader(self.top_bar)
         self._controls_fader = Fader(self.controls)
@@ -431,6 +438,20 @@ class OverlayWindow(QWidget):
             chip.show()
         else:
             chip.hide()
+
+    def update_recording(self, active: bool, elapsed_ms: int = 0) -> None:
+        """Red "● REC 0:12" pill in the top bar; the record button turns red."""
+        self.rec.setVisible(active)
+        if active:
+            self.rec.setText(f"● REC  {format_ms(elapsed_ms)}")
+            self.rec.adjustSize()
+            self.rec.move(22, 46)
+            self.rec.raise_()
+        b = self.controls.buttons["record"]
+        if b.property("recording") != active:
+            b.setProperty("recording", active)
+            b.set_accent(active)
+            b.setToolTip("Stop recording (Shift+R)" if active else "Record (Shift+R)")
 
     def update_fullscreen(self, on: bool) -> None:
         self.controls.buttons["fullscreen"].set_icon_name("fullscreen-exit" if on else "fullscreen")

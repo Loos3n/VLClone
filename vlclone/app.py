@@ -67,6 +67,21 @@ def self_test(report: str) -> int:
     return code
 
 
+def make_transcoder_factory(fake: bool = False):
+    """Engine for conversions/recording/streaming: a separate libVLC instance, created on first use."""
+    if fake:
+        from .core.fake_backend import FakeTranscoder
+
+        return lambda: FakeTranscoder(realtime_speed=4.0)
+
+    def factory():
+        from .core.vlc_backend import VlcTranscoder
+
+        return VlcTranscoder()
+
+    return factory
+
+
 def make_library(settings, fake: bool = False):
     """The media library service; metadata and thumbnails come from libVLC unless faked."""
     from .core.library import LibraryDB
@@ -205,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     from .core.controller import PlayerController
     from .core.effects import EffectsStore, EqPresetStore
     from .core.resume import ResumeStore
+    from .core.fake_backend import FakeTranscoder
     from .core.session import clear_saved_playlist, restore_playlist, save_playlist
     from .core.settings import Settings
     from .ui.main_window import MainWindow
@@ -236,7 +252,10 @@ def main(argv: list[str] | None = None) -> int:
     if settings.restore_playlist:
         restore_playlist(controller.playlist)
     library = make_library(settings, fake=args.fake_backend)
-    window = MainWindow(controller, settings, library)
+    transcoder = make_transcoder_factory(fake=args.fake_backend)
+    window = MainWindow(controller, settings, library, transcoder,
+                        (lambda: FakeTranscoder(instant=True)) if args.fake_backend else None)
+    window.presets.start()  # background: which presets this libVLC can write (cached per version)
     window.show()
     if args.inputs:
         controller.open(args.inputs)

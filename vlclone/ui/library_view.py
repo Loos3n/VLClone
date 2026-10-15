@@ -349,6 +349,7 @@ class LibraryView(QWidget):
     #: (mrls, play now) — play or add to the playlist
     open_requested = Signal(list, bool)
     back_requested = Signal()
+    convert_requested = Signal(list)  # LibraryItems
 
     def __init__(self, service: LibraryService, settings: Settings,
                  resume_entries: Callable[[], dict] = dict, trigger: Callable[[str], None] = lambda a: None,
@@ -716,6 +717,7 @@ class LibraryView(QWidget):
         mrls = [i.mrl for i in items]
         menu.addAction(icon("play"), "Play", lambda: self.open_requested.emit(mrls, True))
         menu.addAction(icon("plus"), "Add to playlist", lambda: self.open_requested.emit(mrls, False))
+        menu.addAction(icon("convert"), "Convert / save…", lambda: self.convert_requested.emit(list(items)))
         first = items[0]
         if first.path:
             menu.addAction(icon("folder"), "Show in folder", lambda: show_in_folder(first.path))

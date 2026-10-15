@@ -334,8 +334,10 @@ class FakeTranscoder(TranscodeEngine):
                     "mp3": "mpga", "vorb": "vorb", "opus": "Opus", "flac": "flac"}
     MP3_FRAME = b"\xff\xfb\x90\x00"
 
-    def __init__(self, instant: bool = False) -> None:
+    def __init__(self, instant: bool = False, realtime_speed: float = 0.0) -> None:
         self.instant = instant
+        #: >0: jobs advance by wall-clock time × speed on poll (for --fake-backend demos)
+        self.realtime_speed = realtime_speed
         self.default_length_ms = 10_000
         self.lengths: dict[str, int] = {}
         self.sources: dict = {}  # mrl -> transcode.SourceInfo
@@ -350,10 +352,7 @@ class FakeTranscoder(TranscodeEngine):
     def advance(self, ms: int) -> None:
         for h in self.handles:
             if h["state"] == "running":
-                h["time"] += ms
-                if not h["live"] and h["time"] >= h["end"]:
-                    h["time"] = h["end"]
-                    self._finish(h)
+                self._advance_one(h, ms)
 
     @staticmethod
     def _sout(options: list[str]) -> str:
@@ -417,9 +416,22 @@ class FakeTranscoder(TranscodeEngine):
         return h
 
     def poll(self, handle):
+        import time as _time
+
         from .converter import EngineStatus
 
+        if self.realtime_speed and handle["state"] == "running":
+            now = _time.monotonic()
+            last = handle.setdefault("wall", now)
+            handle["wall"] = now
+            self._advance_one(handle, int((now - last) * 1000 * self.realtime_speed))
         return EngineStatus(handle["state"], handle["time"], handle["length"])
+
+    def _advance_one(self, h: dict, ms: int) -> None:
+        h["time"] += ms
+        if not h["live"] and h["time"] >= h["end"]:
+            h["time"] = h["end"]
+            self._finish(h)
 
     def stop(self, handle) -> None:
         if handle["state"] == "running":
