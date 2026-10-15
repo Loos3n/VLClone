@@ -280,9 +280,10 @@ def test_engine_start_failure(tmp_path):
     assert job.state is JobState.FAILED and "no libVLC" in job.error
 
 
-def test_run_to_end(engine):
+def test_run_to_end(engine, tmp_path):
     engine.instant = True
-    assert run_to_end(engine, "file:///a.mkv", [":sout=#std{access=file,mux=mkv,dst='/dev/null'}"], 2) == "ended"
+    dst = (tmp_path / "out.mkv").as_posix()
+    assert run_to_end(engine, "file:///a.mkv", [f":sout=#std{{access=file,mux=mkv,dst='{dst}'}}"], 2) == "ended"
 
 
 # ------------------------------------------------------------------- probe
