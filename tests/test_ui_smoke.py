@@ -107,3 +107,50 @@ def test_playlist_model_move(window):
     mime = model.mimeData([model.index(0)])
     model.dropMimeData(mime, Qt.MoveAction, 3, 0, model.index(-1))
     assert [it.title for it in window.ctl.playlist] == ["b.mp4", "c.mp4", "a.mp4"]
+
+
+def test_every_default_shortcut_has_an_action(window):
+    from vlclone.core.shortcuts import DEFAULT_SHORTCUTS
+
+    missing = [a for a in DEFAULT_SHORTCUTS if a not in window.actions.actions]
+    assert missing == []
+
+
+def test_media_info_dialog(window, app):
+    window.ctl.open(["http://x/clip.mp4"])
+    window._tick()
+    window.show_media_info()
+    app.processEvents()
+    dlg = window._media_info
+    assert dlg.isVisible()
+    texts = [w.text() for w in dlg.findChildren(type(dlg.findChild(type(window.overlay.title))))]
+    assert any("1920 × 1080" in t for t in texts)
+    dlg.close()
+
+
+def test_settings_dialog_applies(window, app):
+    from vlclone.ui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(window.settings, window.apply_settings, window)
+    dlg.shortcuts.editors["play_pause"].setKeySequence("K")
+    for field, getter, setter in dlg._bindings:
+        if field == "controls_hide_delay_ms":
+            setter(5000)
+        if field == "max_volume":
+            setter(125)
+    dlg.accept()
+    assert window.settings.controls_hide_delay_ms == 5000
+    assert window.overlay.hide_delay_ms == 5000
+    assert window.settings.shortcuts["play_pause"] == ["K", "Media Play"]
+    assert any(k.toString() == "K" for k in window.actions.get("play_pause").shortcuts())
+    assert window.ctl.max_volume == 125
+
+
+def test_default_key_strings_parse_in_qt(app):
+    from PySide6.QtGui import QKeySequence
+
+    from vlclone.core.shortcuts import resolve_shortcuts
+
+    for action, keys in resolve_shortcuts().items():
+        for key in keys:
+            assert QKeySequence(key).toString() == key, (action, key)

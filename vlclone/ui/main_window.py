@@ -22,8 +22,10 @@ from ..core.timefmt import format_ms
 from .actions import ActionRegistry
 from .dialogs import JumpToTimeDialog, OpenUrlDialog
 from .icons import icon
+from .media_info import MediaInfoDialog
 from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
+from .settings_dialog import SettingsDialog
 from .quick_settings import AudioPage, QuickSettings, SubtitlesPage, VideoPage
 from .video_surface import VideoSurface
 
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         self._fullscreen_restore_sidebar = False
         self._was_maximized = False
         self._attached = False
+        self._media_info: MediaInfoDialog | None = None
         self._sidebar_anim = QVariantAnimation(self, duration=220, easingCurve=QEasingCurve.OutCubic)
         self._sidebar_anim.valueChanged.connect(self._apply_sidebar_width)
         self._sidebar_anim.finished.connect(self._sidebar_anim_done)
@@ -179,6 +182,8 @@ class MainWindow(QMainWindow):
         a.register("cycle_deinterlace", c.cycle_deinterlace)
         a.register("rotate", c.rotate)
         a.register("snapshot", self.take_snapshot)
+        a.register("media_info", self.show_media_info)
+        a.register("settings", self.show_settings)
 
     # ============================================================ controller
     def _connect_controller(self) -> None:
@@ -249,7 +254,10 @@ class MainWindow(QMainWindow):
         return QRect(self.video.mapToGlobal(QPoint(0, 0)), self.video.size())
 
     def _sync_overlay(self) -> None:
-        if not self.isVisible() or self.isMinimized():
+        # The overlay is a separate always-above window; keep it out of the
+        # way while a modal dialog (file picker, settings…) is up.
+        modal = QApplication.activeModalWidget()
+        if not self.isVisible() or self.isMinimized() or (modal is not None and modal is not self):
             if self.overlay.isVisible():
                 self.overlay.hide()
             return
@@ -502,6 +510,9 @@ class MainWindow(QMainWindow):
         view.addAction(a("toggle_playlist"))
         view.addAction(a("fullscreen"))
         view.addAction(a("always_on_top"))
+        menu.addAction(icon("info"), "Media information", self.show_media_info).setShortcut(
+            a("media_info").shortcut())
+        menu.addAction(icon("settings"), "Settings", self.show_settings).setShortcut(a("settings").shortcut())
         menu.addSeparator()
         menu.addAction(a("quit"))
         return menu
@@ -555,6 +566,37 @@ class MainWindow(QMainWindow):
         video.addSeparator()
         video.addAction(a("snapshot"))
         video.addAction("Reset video adjustments", c.reset_video)
+
+    def show_media_info(self) -> None:
+        if self._media_info is None:
+            self._media_info = MediaInfoDialog(self.ctl, self)
+        self._media_info.refresh()
+        self._media_info.show()
+        self._media_info.raise_()
+
+    def show_settings(self) -> None:
+        dlg = SettingsDialog(self.settings, self.apply_settings, self)
+        dlg.set_engine_version(self.ctl.backend.engine_version())
+        dlg.exec()
+
+    def apply_settings(self) -> None:
+        """Apply what can change live; engine options apply on next start."""
+        s = self.settings
+        self.overlay.hide_delay_ms = s.controls_hide_delay_ms
+        self.overlay.controls.volume.set_maximum(self.ctl.max_volume)
+        if self.ctl.volume > self.ctl.max_volume:
+            self.ctl.set_volume(self.ctl.max_volume, show=False)
+        self.actions.apply_bindings(s.shortcuts)
+        if bool(self.windowFlags() & Qt.WindowStaysOnTopHint) != s.always_on_top:
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, s.always_on_top)
+            self.show()
+        self.actions.get("always_on_top").setChecked(s.always_on_top)
+        if self.ctl.resume:
+            self.ctl.resume.min_position_ms = s.resume_min_seconds * 1000
+        try:
+            s.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Settings", f"Could not save settings:\n{exc}")
 
     def load_subtitle_dialog(self) -> None:
         if not self.ctl.has_media:

@@ -11,8 +11,10 @@ from .paths import config_dir
 
 class ResumeStore:
     MAX_ENTRIES = 500
-    #: Positions this close to the end count as "finished".
+    #: Positions this close to the end count as "finished" (capped at 5% of
+    #: the length so short clips can still be resumed).
     END_MARGIN_MS = 15_000
+    END_MARGIN_FRACTION = 0.05
 
     def __init__(self, path: Path | None = None, min_position_ms: int = 15_000) -> None:
         self.path = path or (config_dir() / "resume.json")
@@ -35,7 +37,8 @@ class ResumeStore:
         if length_ms is not None and length_ms <= 0:
             # Live streams and unknown lengths have nothing to resume.
             return
-        near_end = length_ms and position_ms >= length_ms - self.END_MARGIN_MS
+        margin = min(self.END_MARGIN_MS, length_ms * self.END_MARGIN_FRACTION) if length_ms else 0
+        near_end = bool(length_ms) and position_ms >= length_ms - margin
         if position_ms < self.min_position_ms or near_end:
             self.forget(mrl)
             return

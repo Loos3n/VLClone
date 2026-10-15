@@ -133,7 +133,7 @@ QComboBox QAbstractItemView {{
 QSpinBox::up-button, QSpinBox::down-button {{ width: 0px; border: none; }}
 QCheckBox {{ spacing: 10px; }}
 QCheckBox::indicator {{
-    width: 34px; height: 18px; border-radius: 9px;
+    width: 16px; height: 16px; border-radius: 4px;
     background: {SURFACE_3}; border: 1px solid {BORDER};
 }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT}; }}

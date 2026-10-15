@@ -50,12 +50,14 @@ def test_resume_store(tmp_path):
     store.update("file:///b.mkv", 5_000, 600_000)       # too early
     store.update("file:///c.mkv", 595_000, 600_000)     # basically finished
     store.update("http://live", 60_000, 0)              # live stream
+    store.update("file:///short.mkv", 20_000, 30_000)   # short clip: 5% margin
     store.save()
     again = ResumeStore(path)
     assert again.get("file:///a.mkv") == 60_000
     assert again.get("file:///b.mkv") is None
     assert again.get("file:///c.mkv") is None
     assert again.get("http://live") is None
+    assert again.get("file:///short.mkv") == 20_000
     again.update("file:///a.mkv", 1_000, 600_000)       # rewound to start -> forget
     assert again.get("file:///a.mkv") is None
 

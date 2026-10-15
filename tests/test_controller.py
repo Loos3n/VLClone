@@ -180,9 +180,9 @@ def test_resume_forgotten_at_end(ctl):
     run(ctl, 1_000)
     ctl.seek(20_000)
     ctl.pause()
-    assert ctl.resume.get("http://x/short.mp4") is None  # within END_MARGIN_MS of the end
+    assert ctl.resume.get("http://x/short.mp4") == 20_000
     ctl.play()
-    run(ctl, 12_000)
+    run(ctl, 12_000)  # plays to the end
     assert ctl.resume.get("http://x/short.mp4") is None
 
 

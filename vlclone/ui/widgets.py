@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import (QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize,
                             Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel, QSizePolicy, QToolButton, QWidget
+from PySide6.QtWidgets import QCheckBox, QGraphicsOpacityEffect, QLabel, QSizePolicy, QToolButton, QWidget
 
 from ..core.timefmt import format_ms
 from . import theme
@@ -360,6 +360,56 @@ class FadingLabel(QLabel):
         self._anim.start()
 
 
+class ToggleSwitch(QCheckBox):
+    """iOS-style switch with an animated knob."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(42, 24)
+        self._pos = 0.0
+        self._anim = QVariantAnimation(self, duration=140, easingCurve=QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(self._set_pos)
+        self.toggled.connect(self._animate)
+
+    def _set_pos(self, v) -> None:
+        self._pos = float(v)
+        self.update()
+
+    def _animate(self, on: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if on else 0.0)
+        self._anim.start()
+
+    def setChecked(self, on: bool) -> None:  # noqa: N802 (Qt naming)
+        super().setChecked(on)
+        self._anim.stop()
+        self._set_pos(1.0 if on else 0.0)
+
+    def hitButton(self, pos) -> bool:  # noqa: N802
+        return self.rect().contains(pos)
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        off = QColor(theme.SURFACE_3)
+        on = QColor(theme.ACCENT)
+        track = QColor(
+            int(off.red() + (on.red() - off.red()) * self._pos),
+            int(off.green() + (on.green() - off.green()) * self._pos),
+            int(off.blue() + (on.blue() - off.blue()) * self._pos),
+        )
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        d = r.height() - 6
+        x = r.left() + 3 + (r.width() - d - 6) * self._pos
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(x, r.top() + 3, d, d))
+
+
 class Fader:
     """Animate a widget's opacity with a QGraphicsOpacityEffect."""
 
@@ -392,4 +442,4 @@ class Fader:
         return self.effect.opacity()
 
 
-__all__ = ["IconButton", "SeekSlider", "VolumeSlider", "FadingLabel", "Fader"]
+__all__ = ["IconButton", "SeekSlider", "VolumeSlider", "FadingLabel", "Fader", "ToggleSwitch"]
