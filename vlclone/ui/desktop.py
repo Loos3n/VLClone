@@ -22,9 +22,6 @@ from .icons import icon
 
 log = logging.getLogger("vlclone.desktop")
 
-MEDIA_COMMANDS = ("play_pause", "play", "pause", "next", "previous", "stop")
-
-
 class DesktopIntegration:
     def __init__(self, settings: Settings, run: Callable[[str], None]) -> None:
         self.settings = settings

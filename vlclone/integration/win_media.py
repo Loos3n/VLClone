@@ -7,19 +7,26 @@ publish the title and state and to receive the overlay's / media keys'
 Play, Pause, Next, Previous and Stop. pywinrt (``winrt-*`` packages)
 provides the WinRT projection; without it this is a no-op.
 
-Button presses arrive on a WinRT thread pool thread, so they are queued and
-the window's timer drains them with :meth:`MediaOverlay.poll`.
+Everything WinRT runs on one worker thread: pywinrt initialises COM as a
+multi-threaded apartment when imported, while Qt's GUI thread is already a
+single-threaded apartment (OLE drag and drop), and the two must not meet on
+one thread. The window hands states to the worker with :meth:`update` and
+drains button presses with :meth:`poll` from its timer (presses arrive on
+a WinRT thread-pool thread and are queued).
 """
 
 from __future__ import annotations
 
 import collections
 import logging
+import queue
 import threading
 
 from ..core.desktop import SessionState
 
 log = logging.getLogger("vlclone.smtc")
+
+_CLOSE = object()
 
 
 def _enum(enum_type, *names):
@@ -29,80 +36,125 @@ def _enum(enum_type, *names):
     raise AttributeError(f"{enum_type.__name__} has none of {names}")
 
 
-class MediaOverlay:
-    def __init__(self) -> None:
+class _Session:
+    """The WinRT side; created and used on the worker thread only."""
+
+    def __init__(self, pressed) -> None:
         from winrt.windows.media import (MediaPlaybackStatus, MediaPlaybackType,
                                          SystemMediaTransportControlsButton)
         from winrt.windows.media.playback import MediaPlayer
 
         B = SystemMediaTransportControlsButton
-        self._buttons = {}
+        self.buttons = {}
         for command, names in (("play", ("PLAY", "Play")), ("pause", ("PAUSE", "Pause")),
                                ("next", ("NEXT", "Next")), ("previous", ("PREVIOUS", "Previous")),
                                ("stop", ("STOP", "Stop"))):
-            self._buttons[_enum(B, *names)] = command
+            self.buttons[_enum(B, *names)] = command
         S = MediaPlaybackStatus
-        self._status = {"playing": _enum(S, "PLAYING", "Playing"), "paused": _enum(S, "PAUSED", "Paused"),
-                        "stopped": _enum(S, "STOPPED", "Stopped"), "closed": _enum(S, "CLOSED", "Closed")}
-        self._type_video = _enum(MediaPlaybackType, "VIDEO", "Video")
-        self._type_music = _enum(MediaPlaybackType, "MUSIC", "Music")
-        self._queue: collections.deque[str] = collections.deque(maxlen=32)
-        self._lock = threading.Lock()
-        self._player = MediaPlayer()
-        self._player.command_manager.is_enabled = False
-        smtc = self._player.system_media_transport_controls
+        self.status = {"playing": _enum(S, "PLAYING", "Playing"), "paused": _enum(S, "PAUSED", "Paused"),
+                       "stopped": _enum(S, "STOPPED", "Stopped"), "closed": _enum(S, "CLOSED", "Closed")}
+        self.type_video = _enum(MediaPlaybackType, "VIDEO", "Video")
+        self.type_music = _enum(MediaPlaybackType, "MUSIC", "Music")
+        self.player = MediaPlayer()
+        self.player.command_manager.is_enabled = False
+        smtc = self.player.system_media_transport_controls
         smtc.is_enabled = True
-        for prop in ("is_play_enabled", "is_pause_enabled", "is_stop_enabled"):
-            setattr(smtc, prop, True)
+        smtc.is_play_enabled = True
+        smtc.is_pause_enabled = True
+        smtc.is_stop_enabled = True
         smtc.is_next_enabled = False
         smtc.is_previous_enabled = False
-        smtc.playback_status = self._status["closed"]
-        self._token = smtc.add_button_pressed(self._pressed)
-        self._smtc = smtc
-        self._last: SessionState | None = None
-        log.info("media overlay (SMTC) ready")
-
-    def _pressed(self, sender, args) -> None:  # WinRT thread
-        command = self._buttons.get(args.button)
-        if command:
-            with self._lock:
-                self._queue.append(command)
-
-    def poll(self) -> list[str]:
-        with self._lock:
-            commands = list(self._queue)
-            self._queue.clear()
-        return commands
+        smtc.playback_status = self.status["closed"]
+        self.token = smtc.add_button_pressed(lambda sender, args: pressed(self.buttons.get(args.button)))
+        self.smtc = smtc
+        self.last: SessionState | None = None
 
     def update(self, s: SessionState) -> None:
-        if s == self._last:
-            return
-        last, self._last = self._last, s
-        smtc = self._smtc
+        last, self.last = self.last, s
+        smtc = self.smtc
         if last is None or (last.title, last.artist, last.has_video) != (s.title, s.artist, s.has_video):
             du = smtc.display_updater
             du.clear_all()
             if s.title:
                 if s.has_video:
-                    du.type = self._type_video
+                    du.type = self.type_video
                     du.video_properties.title = s.title
                     if s.artist:
                         du.video_properties.subtitle = s.artist
                 else:
-                    du.type = self._type_music
+                    du.type = self.type_music
                     du.music_properties.title = s.title
                     du.music_properties.artist = s.artist
             du.update()
         smtc.is_next_enabled = s.can_next
         smtc.is_previous_enabled = s.can_previous
-        smtc.playback_status = self._status["closed" if not s.title else s.status]
+        smtc.playback_status = self.status["closed" if not s.title else s.status]
 
     def close(self) -> None:
         try:
-            self._smtc.remove_button_pressed(self._token)
-            self._smtc.is_enabled = False
+            self.smtc.remove_button_pressed(self.token)
+            self.smtc.is_enabled = False
         except Exception:
             pass
+
+
+class MediaOverlay:
+    def __init__(self, timeout_s: float = 8.0) -> None:
+        self._pressed: collections.deque[str] = collections.deque(maxlen=32)
+        self._lock = threading.Lock()
+        self._jobs: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._error: BaseException | None = None
+        self._last: SessionState | None = None
+        self._thread = threading.Thread(target=self._run, name="media-overlay", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout_s):
+            raise TimeoutError("the media overlay did not start")
+        if self._error is not None:
+            raise self._error
+        log.info("media overlay (SMTC) ready")
+
+    def _press(self, command: str | None) -> None:  # WinRT thread pool
+        if command:
+            with self._lock:
+                self._pressed.append(command)
+
+    def _run(self) -> None:
+        try:
+            session = _Session(self._press)
+        except BaseException as exc:  # ImportError without pywinrt, OSError on old Windows…
+            self._error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        while True:
+            job = self._jobs.get()
+            if job is _CLOSE:
+                session.close()
+                return
+            try:
+                session.update(job)
+            except Exception as exc:
+                log.warning("media overlay update failed: %s", exc)
+
+    def poll(self) -> list[str]:
+        with self._lock:
+            commands = list(self._pressed)
+            self._pressed.clear()
+        return commands
+
+    def update(self, s: SessionState) -> None:
+        """Publish the player's state (only changes are sent; position ticks are ignored)."""
+        key = (s.status, s.title, s.artist, s.has_video, s.can_previous, s.can_next)
+        if self._last is not None and key == (self._last.status, self._last.title, self._last.artist,
+                                              self._last.has_video, self._last.can_previous, self._last.can_next):
+            return
+        self._last = s
+        self._jobs.put(s)
+
+    def close(self, timeout_s: float = 2.0) -> None:
+        self._jobs.put(_CLOSE)
+        self._thread.join(timeout_s)
 
 
 def create_media_overlay() -> MediaOverlay | None:

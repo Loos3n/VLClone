@@ -554,3 +554,72 @@ def test_installer_associations_are_generated(tmp_path):
     assert 'Subkey: "Software\\Classes\\.mkv"; ValueType: string; ValueData: "VLClone.Video"' in text
     assert "RemoveDefaultIfOurs('.mkv', 'VLClone.Video');" in text
     assert '""{app}\\VLClone.exe"" --play ""%1""' in text
+
+
+# ------------------------------------------------------------------ media overlay plumbing
+def test_media_overlay_runs_winrt_on_its_own_thread(monkeypatch):
+    """With a stand-in for pywinrt: WinRT objects are only touched on the overlay's thread,
+    state changes are published (not position ticks), and button presses reach poll()."""
+    import enum
+    import sys
+    import threading
+    import time
+    import types
+
+    touched = set()
+
+    class Obj:
+        def __init__(self, **kw):
+            object.__setattr__(self, "_d", dict(kw))
+
+        def __getattr__(self, name):
+            touched.add(threading.current_thread().name)
+            return self._d[name]
+
+        def __setattr__(self, name, value):
+            touched.add(threading.current_thread().name)
+            self._d[name] = value
+
+    Button = enum.IntEnum("SystemMediaTransportControlsButton", "PLAY PAUSE STOP RECORD FAST_FORWARD REWIND NEXT PREVIOUS")
+    Status = enum.IntEnum("MediaPlaybackStatus", "CLOSED CHANGING STOPPED PLAYING PAUSED")
+    Kind = enum.IntEnum("MediaPlaybackType", "UNKNOWN MUSIC VIDEO IMAGE")
+    handlers, updates = [], []
+    video, music = Obj(title="", subtitle=""), Obj(title="", artist="")
+    du = Obj(type=None, video_properties=video, music_properties=music,
+             clear_all=lambda: None, update=lambda: updates.append((du.type, video.title, music.title)))
+    smtc = Obj(display_updater=du, add_button_pressed=lambda h: handlers.append(h) or 1,
+               remove_button_pressed=lambda t: None)
+
+    class MediaPlayer:
+        def __init__(self):
+            self.command_manager = Obj(is_enabled=True)
+            self.system_media_transport_controls = smtc
+
+    media = types.ModuleType("winrt.windows.media")
+    media.SystemMediaTransportControlsButton, media.MediaPlaybackStatus, media.MediaPlaybackType = Button, Status, Kind
+    playback = types.ModuleType("winrt.windows.media.playback")
+    playback.MediaPlayer = MediaPlayer
+    for name, mod in (("winrt", types.ModuleType("winrt")), ("winrt.windows", types.ModuleType("winrt.windows")),
+                      ("winrt.windows.media", media), ("winrt.windows.media.playback", playback)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    from vlclone.core.desktop import SessionState
+    from vlclone.integration.win_media import create_media_overlay
+
+    overlay = create_media_overlay()
+    assert overlay is not None
+    overlay.update(SessionState("playing", "Film", "", True, 1000, 9000, True, True))
+    overlay.update(SessionState("playing", "Film", "", True, 2000, 9000, True, True))  # position only: skipped
+    overlay.update(SessionState("paused", "Song", "Artist", False, 0, 9000, False, True))
+    end = time.monotonic() + 5
+    while len(updates) < 2 and time.monotonic() < end:
+        time.sleep(0.01)
+    time.sleep(0.05)
+    seen = set(touched)  # before this test reads anything itself
+    assert updates == [(Kind.VIDEO, "Film", ""), (Kind.MUSIC, "Film", "Song")]
+    assert smtc.playback_status == Status.PAUSED and smtc.is_previous_enabled is False
+    handlers[0](smtc, Obj(button=Button.NEXT))  # the media overlay's Next (a WinRT thread)
+    handlers[0](smtc, Obj(button=Button.RECORD))  # not ours: ignored
+    assert overlay.poll() == ["next"] and overlay.poll() == []
+    overlay.close()
+    assert seen == {"media-overlay"}  # never on the caller's (Qt) thread

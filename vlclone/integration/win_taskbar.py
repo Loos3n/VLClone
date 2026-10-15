@@ -84,8 +84,14 @@ def hicon_from_image(image) -> int:
     w, h = img.width(), img.height()
     gdi32, user32 = ctypes.windll.gdi32, ctypes.windll.user32
     gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+    gdi32.CreateDIBSection.argtypes = [wintypes.HDC, c_void_p, wintypes.UINT, POINTER(c_void_p),
+                                       wintypes.HANDLE, wintypes.DWORD]
     gdi32.CreateBitmap.restype = wintypes.HBITMAP
+    gdi32.CreateBitmap.argtypes = [ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.UINT, c_void_p]
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
     user32.CreateIconIndirect.restype = wintypes.HICON
+    user32.CreateIconIndirect.argtypes = [POINTER(ICONINFO)]
+    user32.DestroyIcon.argtypes = [wintypes.HICON]
     bih = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
     bits = c_void_p()
     color = gdi32.CreateDIBSection(None, byref(bih), 0, byref(bits), None, 0)
@@ -115,6 +121,7 @@ class TaskbarControls:
         self._ptr = None
         self._icons: dict[str, int] = {}
         self._buttons_added = False
+        self._tried = False
         self._last: TaskbarState | None = None
 
     # --------------------------------------------------------- native events
@@ -171,6 +178,11 @@ class TaskbarControls:
         if state == self._last:
             return
         previous, self._last = self._last, state
+        if not self._buttons_added and not self._tried:
+            # TaskbarButtonCreated may have arrived before these controls existed: try once now.
+            self._tried = True
+            self._button_created()
+            return
         if self._ptr is None or not self._buttons_added:
             return
         try:
@@ -199,5 +211,5 @@ class TaskbarControls:
                 pass
             self._ptr = None
         for hicon in self._icons.values():
-            ctypes.windll.user32.DestroyIcon(wintypes.HICON(hicon))
+            ctypes.windll.user32.DestroyIcon(hicon)
         self._icons.clear()

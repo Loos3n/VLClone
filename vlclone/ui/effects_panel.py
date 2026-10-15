@@ -11,7 +11,7 @@ import math
 from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
                                QInputDialog, QLabel, QMessageBox, QPushButton, QSlider, QStackedWidget,
                                QVBoxLayout, QWidget)

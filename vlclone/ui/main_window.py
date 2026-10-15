@@ -51,7 +51,7 @@ from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
 from .settings_dialog import SettingsDialog
 from .quick_settings import AudioPage, ChaptersPage, QuickSettings, SubtitlesPage, VideoPage
-from .desktop import MEDIA_COMMANDS, DesktopIntegration
+from .desktop import DesktopIntegration
 from .video_surface import VideoSurface
 
 log = logging.getLogger("vlclone.ui")
@@ -1106,7 +1106,8 @@ class MainWindow(QMainWindow):
             getattr(c, command)()
 
     def nativeEvent(self, event_type, message):  # noqa: N802 (Qt API)
-        if sys.platform == "win32" and event_type == b"windows_generic_MSG" and self.desktop.taskbar is not None:
+        if (sys.platform == "win32" and self.desktop.taskbar is not None
+                and bytes(event_type) == b"windows_generic_MSG"):
             try:
                 from ctypes import wintypes
 

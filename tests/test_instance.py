@@ -11,9 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6.QtNetwork")
 
-from PySide6.QtCore import QCoreApplication  # noqa: E402
-
-from vlclone.core.instance import HandoffMessage, server_name  # noqa: E402
+from vlclone.core.instance import server_name  # noqa: E402
 from vlclone.ui.instance import InstanceGuard  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]

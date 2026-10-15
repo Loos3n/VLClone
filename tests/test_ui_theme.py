@@ -4,7 +4,6 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QColor, QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 

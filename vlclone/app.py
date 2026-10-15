@@ -288,7 +288,6 @@ def _self_test_phase4(tmp: str) -> list[str]:
 def _self_test_phase5(tmp: str) -> list[str]:
     """Single-instance handoff to a second real process, a mocked update check, and the
     Windows integration pieces (media overlay, taskbar COM, keep-awake, file types)."""
-    import functools
     import http.server
     import json
     import subprocess
