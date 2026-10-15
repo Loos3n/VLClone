@@ -12,6 +12,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("inputs", nargs="*", help="files, folders, playlists or URLs to play")
     parser.add_argument("--fake-backend", action="store_true",
                         help="run the UI without libVLC (for UI development)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--play", action="store_true", help="play the inputs now (Explorer: Play with VLClone)")
+    mode.add_argument("--enqueue", action="store_true",
+                      help="add the inputs to the playlist (Explorer: Add to VLClone playlist)")
+    parser.add_argument("--new-instance", action="store_true",
+                        help="open a separate window even in single-instance mode")
     parser.add_argument("--self-test", metavar="REPORT",
                         help="load libVLC, write its version to REPORT and exit (used by the build)")
     return parser.parse_args(argv)
@@ -288,17 +294,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QGuiApplication
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
 
     from . import APP_NAME, __version__
-    from .core.controller import PlayerController
-    from .core.effects import EffectsStore, EqPresetStore
-    from .core.resume import ResumeStore
-    from .core.fake_backend import FakeTranscoder
-    from .core.session import clear_saved_playlist, restore_playlist, save_playlist
+    from .core.diagnostics import CrashGuard, log, setup_logging
     from .core.settings import Settings
-    from .ui.main_window import MainWindow
-    from .ui.theme import apply_theme
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -306,6 +306,51 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName(APP_NAME)
     settings = Settings.load()
+    mode = "play" if args.play else ("enqueue" if args.enqueue else None)
+
+    # Single instance: before anything slow, so a second launch hands over and exits at once.
+    guard = None
+    if settings.single_instance and not args.new_instance:
+        from .core.instance import HandoffMessage, server_name
+        from .core.paths import config_dir
+        from .ui.instance import InstanceGuard
+
+        guard = InstanceGuard(server_name(str(config_dir())), config_dir() / "instance.lock")
+        if not guard.acquire():
+            if guard.send(HandoffMessage(list(args.inputs), mode, os.getcwd())):
+                return 0
+            guard = None  # the running instance is hung: run on our own rather than lose the files
+
+    setup_logging()
+    log.info("%s %s starting (Python %s, %s)", APP_NAME, __version__, sys.version.split()[0], sys.platform)
+    crash = CrashGuard()
+    crashes = crash.collect_crashes()
+    crash.start()
+    try:
+        code = run_app(app, args, settings, guard, crashes, mode)
+    except BaseException as exc:
+        crash.fatal(exc)  # the next launch reports it
+        raise
+    crash.stop()
+    if guard is not None:
+        guard.close()
+    log.info("clean exit (%s)", code)
+    return code
+
+
+def run_app(app, args, settings, guard, crashes, mode) -> int:
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+
+    from . import APP_NAME
+    from .core.controller import PlayerController
+    from .core.effects import EffectsStore, EqPresetStore
+    from .core.fake_backend import FakeTranscoder
+    from .core.resume import ResumeStore
+    from .core.session import clear_saved_playlist, restore_playlist, save_playlist
+    from .ui.main_window import MainWindow
+    from .ui.theme import apply_theme
+
     apply_theme(app, settings.theme, settings.accent_color)
     if args.fake_backend:
         from .core.fake_backend import FakeBackend
@@ -327,11 +372,21 @@ def main(argv: list[str] | None = None) -> int:
     library = make_library(settings, fake=args.fake_backend)
     transcoder = make_transcoder_factory(fake=args.fake_backend)
     window = MainWindow(controller, settings, library, transcoder,
-                        (lambda: FakeTranscoder(instant=True)) if args.fake_backend else None)
+                        (lambda: FakeTranscoder(instant=True)) if args.fake_backend else None,
+                        preview_probe_factory=library.probe_factory)
     window.presets.start()  # background: which presets this libVLC can write (cached per version)
+    if guard is not None:
+        guard.received.connect(window.handoff_received)
+    window.restore_window_state()
     window.show()
+    window.after_show()
     if args.inputs:
-        controller.open(args.inputs)
+        controller.open(args.inputs, play=False if mode == "enqueue" else None)
+    if crashes:
+        QTimer.singleShot(700, lambda: window.show_crash_notice(crashes))
+    elif not settings.first_run_done:
+        QTimer.singleShot(400, window.show_welcome)
+    window.schedule_update_check()
 
     code = app.exec()
     try:
@@ -343,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     controller.shutdown()
     library.shutdown()
+    window.shutdown_services()
     try:
         settings.save()
     except OSError:

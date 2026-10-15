@@ -387,3 +387,25 @@ def test_seek_previews_skip_streams(tmp_path):
     svc.set_media(str(tmp_path / "missing.mkv"), 100_000)
     assert not svc.active
     svc.shutdown()
+
+
+def test_per_user_registration_round_trip():
+    from vlclone.integration.win_assoc import MemoryRegistry, register, registered, unregister
+
+    # .mp4 already belongs to another player; .mkv has no default yet.
+    reg = MemoryRegistry(merged={".mp4": "OtherPlayer.mp4"})
+    reg.set(r"Software\Classes\.mp4\OpenWithProgids", "OtherPlayer.mp4", "")
+    register(["video", "playlist"], context_menu=True, exe=r"C:\V\VLClone.exe", reg=reg)
+    assert registered(reg) == ({"video", "playlist"}, True)
+    assert reg.get(r"Software\Classes\.mkv", "") == "VLClone.Video"           # took a free default
+    assert reg.get(r"Software\Classes\.mp4", "") is None                       # left the other player's
+    assert reg.get(r"Software\Classes\.mp4\OpenWithProgids", "VLClone.Video") == ""
+    assert reg.get(r"Software\Classes\.mp3\OpenWithProgids", "VLClone.Audio") is None
+    unregister(reg)
+    assert registered(reg) == (set(), False)
+    assert reg.get(r"Software\Classes\.mkv", "") is None
+    # Other apps' values survive; nothing of ours is left.
+    assert reg.get(r"Software\Classes\.mp4\OpenWithProgids", "OtherPlayer.mp4") == ""
+    leftovers = [(k, n) for k, vals in reg.data.items() for n in vals if "vlclone" in (k + n).lower()]
+    assert leftovers == []
+    assert reg.notified == 2
