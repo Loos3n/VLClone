@@ -84,7 +84,7 @@ def capture_mrl(req: CaptureRequest, platform: str = sys.platform) -> tuple[str,
 
 
 def is_capture_mrl(mrl: str) -> bool:
-    return mrl.split("://", 1)[0].lower() in {"dshow", "v4l2", "v4l", "alsa", "avcapture", "qtcapture"}
+    return mrl.split("://", 1)[0].lower() in {"dshow", "v4l2", "v4l", "alsa", "avcapture", "qtcapture", "screen"}
 
 
 # ----------------------------------------------------------------- discovery
@@ -134,3 +134,38 @@ def list_devices_generic(platform: str = sys.platform) -> dict[str, list[Capture
     if platform == "darwin":
         return {"video": [CaptureDevice("", "Default camera")], "audio": []}
     return {"video": [], "audio": []}
+
+
+# ------------------------------------------------------------------ screen
+SCREEN_MODULES = ("screen", "xcb_screen")  # Windows/macOS module, Linux (X11) module
+SCREEN_FPS = [5, 10, 15, 20, 25, 30, 60]
+
+
+@dataclass
+class ScreenRequest:
+    """Desktop capture (libVLC's screen:// access). A zero width means the whole screen."""
+
+    fps: float = 15.0
+    left: int = 0
+    top: int = 0
+    width: int = 0
+    height: int = 0
+    follow_mouse: bool = False
+    caching_ms: int = DEFAULT_CAPTURE_CACHING_MS
+
+
+def screen_mrl(req: ScreenRequest) -> tuple[str, list[str], str]:
+    """Return ``(mrl, media options, title)`` for a screen capture."""
+    if req.fps <= 0:
+        raise ValueError("Frames per second must be positive")
+    if (req.width > 0) != (req.height > 0):
+        raise ValueError("Give both a width and a height for the region, or neither")
+    options = [f":screen-fps={req.fps:g}", f":live-caching={max(0, int(req.caching_ms))}"]
+    region = req.width > 0
+    if region:
+        options += [f":screen-left={req.left}", f":screen-top={req.top}",
+                    f":screen-width={req.width}", f":screen-height={req.height}"]
+        if req.follow_mouse:
+            options.append(":screen-follow-mouse")
+    title = f"Screen {req.width}×{req.height}" if region else "Screen"
+    return "screen://", options, title

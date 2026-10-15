@@ -74,6 +74,11 @@ jobs:
           if ($report -notmatch "http stream: playing") { Write-Output "::warning::Local HTTP stream did not play in the packaged build" }
           if ($report -notmatch "http 404: failed as expected") { Write-Output "::warning::A missing HTTP stream was not reported as a failure" }
           if ($report -notmatch "thumbnail True") { Write-Output "::warning::Library thumbnails (libVLC vmem) failed in the packaged build" }
+          if ($report -notmatch "convert mp4_h264: ok") { Write-Output "::warning::MP4 conversion failed in the packaged build" }
+          if ($report -notmatch "convert mp3: ok .*MPEG layer 3") { Write-Output "::warning::MP3 conversion failed in the packaged build" }
+          if ($report -notmatch "partial files left: 0") { Write-Output "::warning::A conversion left a partial file behind" }
+          if ($report -notmatch "http stream out: ok") { Write-Output "::warning::HTTP streaming did not serve MPEG-TS in the packaged build" }
+          foreach ($line in (Get-Content selftest.txt | Select-String "^presets ")) { Write-Output "::notice::$line" }
 
       - name: Installer
         run: |

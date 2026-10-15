@@ -40,6 +40,12 @@ def data_dir() -> Path:
     return base
 
 
+def default_videos_dir() -> str:
+    """Where conversions and recordings go by default."""
+    videos = Path.home() / "Videos"
+    return str(videos if videos.is_dir() else Path.home())
+
+
 def default_snapshot_dir() -> str:
     pictures = Path.home() / "Pictures"
     return str(pictures if pictures.is_dir() else Path.home())

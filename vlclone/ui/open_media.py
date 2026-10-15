@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QListWidgetItem, QMenu, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..core.backend import MediaBackend
-from ..core.capture import DEFAULT_CAPTURE_CACHING_MS, RESOLUTIONS, CaptureRequest, capture_mrl
+from ..core.capture import (DEFAULT_CAPTURE_CACHING_MS, RESOLUTIONS, SCREEN_FPS, CaptureRequest, ScreenRequest,
+                            capture_mrl, screen_mrl)
 from ..core.discs import DISC_KINDS, DiscRequest, detect_disc_kind, disc_mrl, disc_root, list_optical_drives
 from ..core.network import UrlHistory, caching_option, normalize_url, stream_kind, validate_url
 from ..core.settings import Settings
@@ -36,6 +37,7 @@ class OpenRequest:
     title: str | None = None
     play: bool = True
     kind: str = "file"
+    record: bool = False  # capture: record to a file instead of playing
 
 
 def _hint(text: str = "") -> QLabel:
@@ -402,11 +404,33 @@ class NetworkTab(_Tab):
 
 # ------------------------------------------------------------------- capture
 class CaptureTab(_Tab):
-    def __init__(self, backend: MediaBackend, settings: Settings) -> None:
+    def __init__(self, backend: MediaBackend, settings: Settings, screen_available: bool | None = True) -> None:
         super().__init__()
         self.backend = backend
         self.settings = settings
         self.platform = sys.platform
+        sources = QHBoxLayout()
+        self.source_group = QButtonGroup(self)
+        self.source_buttons: dict[str, QPushButton] = {}
+        for key, label in (("devices", "Camera && microphone"), ("screen", "Screen")):
+            b = chip(label)
+            self.source_group.addButton(b)
+            b.clicked.connect(lambda _=False, k=key: self.set_source(k))
+            sources.addWidget(b)
+            self.source_buttons[key] = b
+        sources.addStretch(1)
+        self.lay.addLayout(sources)
+        if screen_available is False:
+            b = self.source_buttons["screen"]
+            b.setEnabled(False)
+            b.setToolTip("This VLC has no screen-capture module (Linux: install vlc-plugin-access-extra)")
+        self.pages = QStackedWidget()
+        self.lay.addWidget(self.pages)
+        self.device_page = QWidget()
+        outer_lay = self.lay
+        self.lay = QVBoxLayout(self.device_page)
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.lay.setSpacing(8)
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(10)
@@ -439,10 +463,63 @@ class CaptureTab(_Tab):
         self.lay.addWidget(_hint("Webcams and microphones open through DirectShow on Windows (V4L2/ALSA on "
                                  "Linux). Resolutions the camera does not support fall back to its default."))
         self.lay.addStretch(1)
+        self.lay = outer_lay
+        self.pages.addWidget(self.device_page)
+        self.pages.addWidget(self._screen_page())
+        self.lay.addWidget(_hint("Record to file saves the capture as MKV (H.264 + AAC) in your recordings "
+                                 "folder; stop it from the Conversions panel."))
         self._loaded = False
+        self.set_source("devices")
+
+    def _screen_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(section("Screen"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        self.screen_fps = QComboBox()
+        for fps in SCREEN_FPS:
+            self.screen_fps.addItem(f"{fps} fps", fps)
+        self.screen_fps.setCurrentIndex(SCREEN_FPS.index(15))
+        self.region = QCheckBox("Only a region")
+        self.region_left = _spin(0, 16384, 0, " px")
+        self.region_top = _spin(0, 16384, 0, " px")
+        self.region_width = _spin(16, 16384, 1280, " px")
+        self.region_height = _spin(16, 16384, 720, " px")
+        self.follow_mouse = QCheckBox("Follow the mouse")
+        region_widgets = (self.region_left, self.region_top, self.region_width, self.region_height,
+                          self.follow_mouse)
+        self.region.toggled.connect(lambda on: [w.setEnabled(on) for w in region_widgets])
+        self.region.toggled.emit(False)
+        grid.addWidget(QLabel("Frame rate"), 0, 0)
+        grid.addWidget(self.screen_fps, 0, 1)
+        grid.addWidget(self.region, 1, 0, 1, 2)
+        for r, (label, a, b) in enumerate((("Left / top", self.region_left, self.region_top),
+                                           ("Width / height", self.region_width, self.region_height)), 2):
+            grid.addWidget(QLabel(label), r, 0)
+            grid.addWidget(a, r, 1)
+            grid.addWidget(b, r, 2)
+        grid.addWidget(self.follow_mouse, 4, 1, 1, 2)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
+        lay.addWidget(_hint("Captures the desktop (libVLC's screen:// input). Playing it here shows the "
+                            "screen inside itself; use Record to file to save it."))
+        lay.addStretch(1)
+        return page
+
+    @property
+    def source(self) -> str:
+        return "screen" if self.pages.currentIndex() == 1 else "devices"
+
+    def set_source(self, key: str) -> None:
+        self.source_buttons[key].setChecked(True)
+        self.pages.setCurrentIndex(1 if key == "screen" else 0)
+        if key == "devices" and not self._loaded and self.isVisible():
+            self.refresh()
 
     def on_shown(self) -> None:
-        if not self._loaded:
+        if not self._loaded and self.source == "devices":
             self.refresh()
 
     def refresh(self) -> None:
@@ -468,6 +545,13 @@ class CaptureTab(_Tab):
                                 if n_video or n_audio else "No capture devices found.")
 
     def request(self) -> OpenRequest:
+        if self.source == "screen":
+            region = self.region.isChecked()
+            mrl, options, title = screen_mrl(ScreenRequest(
+                float(self.screen_fps.currentData()), self.region_left.value() if region else 0,
+                self.region_top.value() if region else 0, self.region_width.value() if region else 0,
+                self.region_height.value() if region else 0, region and self.follow_mouse.isChecked()))
+            return OpenRequest([mrl], options, title, kind="capture")
         width, height = self.size.currentData() or (0, 0)
         req = CaptureRequest(self.video.currentData(), self.audio.currentData(), width, height,
                              float(self.fps.currentData() or 0), self.caching.value())
@@ -484,7 +568,8 @@ class CaptureTab(_Tab):
 # -------------------------------------------------------------------- dialog
 class OpenMediaDialog(BaseDialog):
     def __init__(self, backend: MediaBackend, settings: Settings, tab: str = "file", start_dir: str = "",
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, screen_available: bool | None = True,
+                 can_record: bool = False) -> None:
         super().__init__("Open media", parent)
         self.settings = settings
         self.setMinimumSize(640, 540)
@@ -498,7 +583,7 @@ class OpenMediaDialog(BaseDialog):
             "file": FileTab(start_dir),
             "disc": DiscTab(start_dir),
             "network": NetworkTab(settings),
-            "capture": CaptureTab(backend, settings),
+            "capture": CaptureTab(backend, settings, screen_available),
         }
         for key, label in TABS:
             b = QPushButton(label)
@@ -535,6 +620,9 @@ class OpenMediaDialog(BaseDialog):
 
         box = QDialogButtonBox()
         cancel = box.addButton(QDialogButtonBox.Cancel)
+        self.record_button = box.addButton("● Record to file", QDialogButtonBox.ActionRole)
+        self.record_button.clicked.connect(lambda: self._finish(play=False, record=True))
+        self.can_record = can_record
         self.enqueue_button = box.addButton("Enqueue", QDialogButtonBox.ActionRole)
         self.play_button = box.addButton("Play", QDialogButtonBox.AcceptRole)
         self.play_button.setObjectName("Primary")
@@ -555,6 +643,7 @@ class OpenMediaDialog(BaseDialog):
         self.tab_buttons[key].setChecked(True)
         self.stack.setCurrentWidget(self.tabs[key])
         self.error.setText("")
+        self.record_button.setVisible(key == "capture" and self.can_record)
         self.tabs[key].on_shown()
 
     def accept(self) -> None:  # Enter in a field = Play
@@ -573,12 +662,13 @@ class OpenMediaDialog(BaseDialog):
             req.options.append(opt if opt.startswith(":") else ":" + opt.lstrip("-"))
         return req
 
-    def _finish(self, play: bool) -> None:
+    def _finish(self, play: bool, record: bool = False) -> None:
         try:
             self.request = self.build_request(play)
         except ValueError as exc:
             self.error.setText(str(exc))
             return
+        self.request.record = record
         if self.request.kind == "network":
             self.tabs["network"].remember(self.request.inputs[0])
         super().accept()

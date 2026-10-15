@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .backend import (CaptureDevice, Chapter, MediaBackend, MediaInfo, PlaybackState, StreamInfo, TitleInfo,
                       Track)
+from .converter import TranscodeEngine
 from .effects import EngineFilters
 
 
@@ -318,3 +319,146 @@ class FakeProbe:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeTranscoder(TranscodeEngine):
+    """Deterministic conversion engine (a ``TranscodeEngine``) for tests and ``--fake-backend``.
+
+    A job writes a partial file when it starts and its finished content when
+    it ends; time only moves with :meth:`advance` unless ``instant`` is set.
+    Output files hold the resulting codecs as JSON (after a fake MP3 frame
+    header for MP3), which :meth:`media_info` reads back.
+    """
+
+    CODEC_FOURCC = {"h264": "h264", "hevc": "hevc", "VP80": "VP80", "VP90": "VP90", "mp4a": "mp4a",
+                    "mp3": "mpga", "vorb": "vorb", "opus": "Opus", "flac": "flac"}
+    MP3_FRAME = b"\xff\xfb\x90\x00"
+
+    def __init__(self, instant: bool = False, realtime_speed: float = 0.0) -> None:
+        self.instant = instant
+        #: >0: jobs advance by wall-clock time × speed on poll (for --fake-backend demos)
+        self.realtime_speed = realtime_speed
+        self.default_length_ms = 10_000
+        self.lengths: dict[str, int] = {}
+        self.sources: dict = {}  # mrl -> transcode.SourceInfo
+        self.fail_mrls: set[str] = set()
+        self.unsupported: set[str] = set()  # codec / mux names the "engine" lacks
+        self.modules = {"screen": True, "xcb_screen": True}
+        self.started: list[tuple[str, list[str]]] = []
+        self.handles: list[dict] = []
+        self.released = False
+
+    # helpers for tests
+    def advance(self, ms: int) -> None:
+        for h in self.handles:
+            if h["state"] == "running":
+                self._advance_one(h, ms)
+
+    @staticmethod
+    def _sout(options: list[str]) -> str:
+        return next((o[len(":sout="):] for o in options if o.startswith(":sout=")), "")
+
+    def _finish(self, h: dict) -> None:
+        h["state"] = "ended"
+        self._write(h, final=True)
+
+    def _codecs(self, mrl: str, options: list[str]) -> tuple[list[str], list[str]]:
+        import re
+
+        sout = self._sout(options)
+        source = self.sources.get(mrl)
+        src_v, src_a = (source.video, source.audio) if source else (["h264"], ["mp4a"])
+        mux = (re.search(r"mux=(\w+)", sout) or [None, ""])[1]
+        if mux in self.unsupported:
+            return [], []
+        if "#transcode{" not in sout:
+            return list(src_v), list(src_a)
+        v = (re.search(r"vcodec=(\w+)", sout) or [None, None])[1]
+        a = (re.search(r"acodec=(\w+)", sout) or [None, None])[1]
+        video = [] if not v or ":no-sout-video" in options or v in self.unsupported or not src_v \
+            else [self.CODEC_FOURCC.get(v, v)]
+        audio = [] if not a or a in self.unsupported or not src_a else [self.CODEC_FOURCC.get(a, a)]
+        return video, audio
+
+    def _write(self, h: dict, final: bool) -> None:
+        import json
+
+        if not h["dst"]:
+            return
+        video, audio = h["codecs"]
+        if final and not video and not audio:
+            open(h["dst"], "wb").close()  # what a missing encoder/muxer leaves: an empty file
+            return
+        head = self.MP3_FRAME if "mpga" in audio and not video else b""
+        body = json.dumps({"video": video, "audio": audio, "final": final}).encode()
+        with open(h["dst"], "wb") as fh:
+            fh.write(head + body)
+
+    # TranscodeEngine
+    def start(self, mrl: str, options: list[str]):
+        import re
+
+        self.started.append((mrl, list(options)))
+        sout = self._sout(options)
+        m = re.search(r"dst='((?:[^'\\]|\\.)*)'", sout)
+        dst = m.group(1).replace("\\'", "'").replace("\\\\", "\\") if m and "access=file" in sout else ""
+        length = self.lengths.get(mrl, self.default_length_ms)
+        start = next((int(float(o.split("=", 1)[1]) * 1000) for o in options if o.startswith(":start-time=")), 0)
+        stop = next((int(float(o.split("=", 1)[1]) * 1000) for o in options if o.startswith(":stop-time=")), 0)
+        live = mrl.split("://", 1)[0] in ("screen", "dshow", "v4l2", "udp", "rtsp") or length <= 0
+        h = {"mrl": mrl, "dst": dst, "time": start, "end": stop or length, "length": length, "live": live,
+             "state": "error" if mrl in self.fail_mrls else "running", "codecs": self._codecs(mrl, options)}
+        self.handles.append(h)
+        if h["state"] == "running":
+            self._write(h, final=False)
+            if self.instant and not live:
+                self._finish(h)
+        return h
+
+    def poll(self, handle):
+        import time as _time
+
+        from .converter import EngineStatus
+
+        if self.realtime_speed and handle["state"] == "running":
+            now = _time.monotonic()
+            last = handle.setdefault("wall", now)
+            handle["wall"] = now
+            self._advance_one(handle, int((now - last) * 1000 * self.realtime_speed))
+        return EngineStatus(handle["state"], handle["time"], handle["length"])
+
+    def _advance_one(self, h: dict, ms: int) -> None:
+        h["time"] += ms
+        if not h["live"] and h["time"] >= h["end"]:
+            h["time"] = h["end"]
+            self._finish(h)
+
+    def stop(self, handle) -> None:
+        if handle["state"] == "running":
+            handle["state"] = "stopped"
+            if handle["live"]:
+                self._write(handle, final=True)  # a stopped live job keeps what it wrote
+
+    def media_info(self, path_or_mrl: str):
+        import json
+
+        from .transcode import SourceInfo
+
+        if path_or_mrl in self.sources:
+            return self.sources[path_or_mrl]
+        try:
+            with open(path_or_mrl, "rb") as fh:
+                data = fh.read()
+            raw = json.loads(data[data.index(b"{"):])
+            return SourceInfo(raw["video"], raw["audio"], 0, 1000)
+        except (OSError, ValueError, KeyError):
+            return SourceInfo()
+
+    def has_module(self, name: str):
+        return self.modules.get(name)
+
+    def version(self) -> str:
+        return "fake 1.0"
+
+    def release(self) -> None:
+        self.released = True

@@ -174,6 +174,7 @@ class FilterEdit(QLineEdit):
 class PlaylistPanel(QWidget):
     play_requested = Signal(int)
     files_dropped = Signal(list, int)
+    convert_requested = Signal(list)  # rows
 
     def __init__(self, playlist: Playlist, trigger: Callable[[str], None], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -288,10 +289,14 @@ class PlaylistPanel(QWidget):
         menu.exec(self._add_btn.mapToGlobal(self._add_btn.rect().bottomLeft()))
 
     def _context_menu(self, pos) -> None:
-        index = self.view.indexAt(pos)
+        self.build_context_menu(self.view.indexAt(pos)).exec(self.view.viewport().mapToGlobal(pos))
+
+    def build_context_menu(self, index) -> QMenu:
         menu = QMenu(self)
         if index.isValid():
             menu.addAction(icon("play"), "Play", lambda: self.play_requested.emit(index.row()))
+            rows = self.selected_rows() if index.row() in self.selected_rows() else [index.row()]
+            menu.addAction(icon("convert"), "Convert / save…", lambda: self.convert_requested.emit(rows))
             menu.addAction(icon("trash"), "Remove", self.remove_selected)
             menu.addSeparator()
         menu.addAction(icon("file"), "Add files…", lambda: self.trigger("add_files"))
@@ -301,4 +306,4 @@ class PlaylistPanel(QWidget):
         menu.addAction(icon("save"), "Save playlist…", lambda: self.trigger("save_playlist"))
         menu.addAction(icon("playlist"), "Load playlist…", lambda: self.trigger("load_playlist"))
         menu.addAction(icon("trash"), "Clear", lambda: self.trigger("clear_playlist"))
-        menu.exec(self.view.viewport().mapToGlobal(pos))
+        return menu

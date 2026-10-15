@@ -40,6 +40,14 @@ class Settings:
     library_watch: bool = True      # rescan when watched folders change
     library_thumbnails: bool = True
 
+    # Convert / record / stream ("" folder = the Videos folder)
+    convert_output_dir: str = ""
+    convert_next_to_source: bool = False
+    convert_preset: str = "mp4_h264"
+    record_dir: str = ""
+    stream_port: int = 8080
+    stream_mode: str = "copy"
+
     # Effects ("global": one set for everything, "per_file": each file remembers its own)
     effects_scope: str = "global"
     effects: dict = field(default_factory=dict)
@@ -108,6 +116,13 @@ class Settings:
             self.repeat = "none"
         self.network_caching_ms = min(max(self.network_caching_ms, 0), 60000)
         self.network_timeout_s = min(max(self.network_timeout_s, 0), 600)
+        self.stream_port = min(max(self.stream_port, 1024), 65535)
+        if self.stream_mode not in ("copy", "h264"):
+            self.stream_mode = "copy"
+        from .transcode import CONVERT_PRESETS, DEFAULT_PRESET
+
+        if self.convert_preset not in CONVERT_PRESETS:
+            self.convert_preset = DEFAULT_PRESET
         if self.effects_scope not in ("global", "per_file"):
             self.effects_scope = "global"
 

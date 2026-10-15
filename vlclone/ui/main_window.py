@@ -14,8 +14,14 @@ from ..core.backend import PlaybackState
 from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS, ZOOM_LEVELS,
                                PlayerController, zoom_label)
 from ..core.effects import STEREO_MODES
+from ..core.converter import ConvertQueue, JobState, PresetProber
+from ..core.fake_backend import FakeTranscoder
 from ..core.library import LibraryDB
 from ..core.library_scanner import FilenameProbe, LibraryService
+from ..core.paths import default_videos_dir
+from ..core.recorder import Recorder, recording_name
+from ..core.streamer import HttpStreamer
+from ..core.transcode import PRESETS, ConvertSettings
 from ..core.m3u import write_m3u
 from ..core.media_sources import (AUDIO_EXTENSIONS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS,
                                   VIDEO_EXTENSIONS, is_subtitle_file, mrl_to_path)
@@ -27,8 +33,10 @@ from .actions import ActionRegistry
 from .dialogs import JumpToTimeDialog
 from .icons import icon
 from .effects_panel import EffectsPanel
-from .library_view import LibraryView
+from .convert_dialog import ConvertDialog, ConvertQueuePanel, ConvertSource
+from .library_view import LibraryView, show_in_folder
 from .open_media import OpenMediaDialog
+from .stream_dialog import StreamDialog
 from .media_info import MediaInfoDialog
 from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
@@ -55,12 +63,21 @@ class MainWindow(QMainWindow):
     TICK_MS = 100
 
     def __init__(self, controller: PlayerController, settings: Settings,
-                 library: LibraryService | None = None) -> None:
+                 library: LibraryService | None = None, transcoder_factory=None, probe_factory=None) -> None:
         super().__init__()
         self.ctl = controller
         self.settings = settings
         self.library = library or LibraryService(LibraryDB(), FilenameProbe, watch=settings.library_watch,
                                                  thumbnails=False)
+        # Phase 4: conversions, recording and streaming share one separate engine instance.
+        self.converter = ConvertQueue(transcoder_factory or FakeTranscoder)
+        self.presets = PresetProber(probe_factory or transcoder_factory or (lambda: FakeTranscoder(instant=True)))
+        self.recorder = Recorder(controller, self.converter, settings, self._live_record_preset)
+        self.streamer = HttpStreamer(lambda: self.converter.engine)
+        self.converter.changed.connect(self._job_changed)
+        self._job_states: dict[int, JobState] = {}
+        self._queue_panel: ConvertQueuePanel | None = None
+        self._stream_dialog: StreamDialog | None = None
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(icon("cone"))
         self.setAcceptDrops(True)
@@ -81,6 +98,12 @@ class MainWindow(QMainWindow):
         self.library_view = LibraryView(self.library, settings, self._resume_entries, self.actions.trigger)
         self.library_view.open_requested.connect(self._open_from_library)
         self.library_view.back_requested.connect(self.show_player)
+        self.library_view.convert_requested.connect(
+            lambda items: self.open_convert_dialog([ConvertSource(i.mrl, i.title, duration_ms=i.duration_ms)
+                                                    for i in items]))
+        self.sidebar.convert_requested.connect(
+            lambda rows: self.open_convert_dialog([self._source_for(self.ctl.playlist[r]) for r in rows
+                                                   if 0 <= r < len(self.ctl.playlist)]))
         self.content.addWidget(self.library_view)
         self.splitter.addWidget(self.content)
         self.splitter.addWidget(self.sidebar)
@@ -151,6 +174,10 @@ class MainWindow(QMainWindow):
         a.register("open_disc", lambda: self.open_media_dialog("disc"))
         a.register("open_capture", lambda: self.open_media_dialog("capture"))
         a.register("media_library", self.toggle_library)
+        a.register("convert", lambda: self.open_convert_dialog())
+        a.register("stream", self.open_stream_dialog)
+        a.register("record", self.toggle_recording)
+        a.register("conversions", self.show_conversions)
         a.register("add_files", lambda: self.open_file_dialog(play=False), "Add files…")
         a.register("add_folder", lambda: self.open_folder_dialog(play=False), "Add folder…")
         a.register("add_url", lambda: self.open_media_dialog("network", play=False), "Add URL…")
@@ -327,6 +354,9 @@ class MainWindow(QMainWindow):
     def _tick(self) -> None:
         self.ctl.tick()
         self.library.tick()
+        self.converter.tick()
+        self.recorder.tick()
+        self.overlay.update_recording(self.recorder.active, self.recorder.elapsed_ms())
         if self.library_visible:
             item = self.ctl.playlist.current if self.ctl.has_media else None
             self.library_view.set_now_playing(item.title if item else "", self.ctl.is_playing)
@@ -381,6 +411,99 @@ class MainWindow(QMainWindow):
     def _video_clicked(self) -> None:
         if self.settings.pause_on_click and self.ctl.has_media:
             self.ctl.toggle_play()
+
+    # ======================================================= convert / record
+    def _source_for(self, item) -> ConvertSource:
+        return ConvertSource(item.mrl, item.title, self.ctl.media_options(item), item.duration_ms)
+
+    def _supported(self, key: str) -> bool:
+        support = self.presets.support(key)
+        return support is None or support.ok
+
+    def _live_record_preset(self) -> str:
+        return "remux_mkv" if self._supported("remux_mkv") else "remux_ts"
+
+    def record_folder(self) -> str:
+        return self.settings.record_dir or default_videos_dir()
+
+    def open_convert_dialog(self, sources: list[ConvertSource] | None = None) -> ConvertDialog:
+        """Convert / save (Ctrl+R): the given sources, else what is playing."""
+        if sources is None:
+            item = self.ctl.playlist.current
+            sources = [self._source_for(item)] if item is not None else []
+        dlg = ConvertDialog(self.converter, self.presets, self.settings, sources, self)
+        if dlg.exec() and dlg.jobs:
+            self.show_conversions()
+        return dlg
+
+    def show_conversions(self) -> ConvertQueuePanel:
+        if self._queue_panel is None:
+            self._queue_panel = ConvertQueuePanel(self.converter, self)
+        panel = self._queue_panel
+        if not panel.isVisible():
+            geo = self.geometry()
+            panel.move(geo.right() - panel.width() - 40, geo.top() + 80)
+        panel.show()
+        panel.raise_()
+        return panel
+
+    def toggle_recording(self) -> None:
+        """Record what is playing (Shift+R); again to stop and save."""
+        if self.recorder.active:
+            job = self.recorder.stop()
+            self.overlay.flash("Saving the recording…" if job else "Recording too short; nothing saved")
+            return
+        message = self.recorder.start()
+        if message:
+            self.overlay.flash(message)
+        else:
+            self.overlay.flash("Recording")
+
+    def record_capture(self, mrl: str, options: list[str], title: str):
+        """Record a camera or the screen to a file (Open Media → Capture → Record to file)."""
+        key = "mkv_h264" if self._supported("mkv_h264") else "ts_h264"
+        output = f"{self.record_folder()}/{recording_name(title or 'Capture', PRESETS[key].ext)}"
+        job = self.converter.add(mrl, f"Recording: {title or 'Capture'}", ConvertSettings(key, live=True),
+                                 output, options, live=True)
+        self.show_conversions()
+        return job
+
+    def _job_changed(self, job) -> None:
+        if job is None:
+            return
+        before = self._job_states.get(job.id)
+        self._job_states[job.id] = job.state
+        if before is job.state:
+            return
+        name = Path(job.output).name
+        if job.state is JobState.DONE:
+            self.overlay.toast.show_message(f"Saved {name}", "Show", lambda: show_in_folder(job.output))
+            self.overlay._place_floating()
+        elif job.state is JobState.FAILED:
+            self.overlay.toast.show_message(f"{job.title}: {job.error}", "Details", self.show_conversions,
+                                            ms=12000)
+            self.overlay._place_floating()
+
+    def _stream_source(self):
+        item = self.ctl.playlist.current
+        if item is None or not self.ctl.has_media:
+            return None
+        return item.mrl, self.ctl.media_options(item), item.title, max(0, self.ctl.time())
+
+    def open_stream_dialog(self) -> StreamDialog:
+        if self._stream_dialog is None:
+            self._stream_dialog = StreamDialog(self.streamer, self.settings, self._stream_source, self)
+        self._stream_dialog.refresh()
+        self._stream_dialog.show()
+        self._stream_dialog.raise_()
+        return self._stream_dialog
+
+    def _screen_available(self) -> bool | None:
+        engine = self.converter.engine
+        found = [engine.has_module(name) for name in ("screen", "xcb_screen")]
+        if any(found):
+            return True
+        return False if all(f is False for f in found) else None
 
     # =============================================================== library
     @property
@@ -535,7 +658,9 @@ class MainWindow(QMainWindow):
 
     def open_media_dialog(self, tab: str = "file", play: bool = True) -> OpenMediaDialog:
         """VLC's Open Media dialog: File, Disc, Network and Capture device tabs."""
-        dlg = OpenMediaDialog(self.ctl.backend, self.settings, tab, self._start_dir(), self)
+        dlg = OpenMediaDialog(self.ctl.backend, self.settings, tab, self._start_dir(), self,
+                              screen_available=self._screen_available() if tab == "capture" else True,
+                              can_record=True)
         if not play:
             dlg.play_button.setText("Add")
         if tab == "network":
@@ -547,6 +672,9 @@ class MainWindow(QMainWindow):
                 dlg.tabs["network"].edit.selectAll()
         if dlg.exec() and dlg.request:
             r = dlg.request
+            if r.record:
+                self.record_capture(r.inputs[0], r.options, r.title or "Capture")
+                return dlg
             play = play and r.play
             if r.kind == "file" and self.ctl.has_media and all(is_subtitle_file(i) for i in r.inputs):
                 self.open_inputs(r.inputs)
@@ -646,6 +774,14 @@ class MainWindow(QMainWindow):
                         lambda: self.open_media_dialog("capture")).setShortcut(a("open_capture").shortcut())
         media.addAction("Open media (all sources)…", lambda: self.open_media_dialog("file")).setShortcut(
             a("open_media").shortcut())
+        media.addSeparator()
+        media.addAction(icon("convert"), "Convert / save…", lambda: self.open_convert_dialog()).setShortcut(
+            a("convert").shortcut())
+        media.addAction(icon("stream"), "Stream…", self.open_stream_dialog).setShortcut(a("stream").shortcut())
+        rec = media.addAction(icon("record"), "Stop recording" if self.recorder.active else "Record",
+                              self.toggle_recording)
+        rec.setShortcut(a("record").shortcut())
+        media.addAction("Conversions…", self.show_conversions)
         media.addSeparator()
         media.addAction(a("load_playlist"))
         media.addAction(a("save_playlist"))
@@ -854,6 +990,14 @@ class MainWindow(QMainWindow):
 
     # ============================================================ shutdown
     def closeEvent(self, e: QCloseEvent) -> None:
+        busy = [j for j in self.converter.jobs if j.state in (JobState.QUEUED, JobState.RUNNING) and not j.live]
+        if busy and QMessageBox.question(
+                self, "Conversions running",
+                f"{len(busy)} conversion{'s are' if len(busy) != 1 else ' is'} not finished. Quit and cancel "
+                f"{'them' if len(busy) != 1 else 'it'}? Unfinished files are deleted.") != QMessageBox.Yes:
+            e.ignore()
+            return
+        self.finish_jobs()
         if self.isFullScreen():
             self.showNormal()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
@@ -861,6 +1005,24 @@ class MainWindow(QMainWindow):
         self.quick.hide()
         self.effects_panel.hide()
         super().closeEvent(e)
+
+    def finish_jobs(self, timeout_s: float = 30.0) -> None:
+        """On exit: save a running recording (its short remux runs to the end), stop streaming,
+        cancel unfinished conversions (their partial files are deleted)."""
+        import time as _time
+
+        job = self.recorder.stop()
+        if job is not None and not job.live:
+            for other in self.converter.jobs:  # the user agreed to cancel these; the recording goes first
+                if other is not job and not other.live and not other.finished:
+                    self.converter.cancel(other.id)
+            end = _time.monotonic() + timeout_s
+            while not job.finished and _time.monotonic() < end:
+                self.converter.tick()
+                QApplication.processEvents()
+                _time.sleep(0.02)
+        self.streamer.stop()
+        self.converter.shutdown()
 
     # Drops onto the window chrome / sidebar area outside the overlay
     def dragEnterEvent(self, e) -> None:

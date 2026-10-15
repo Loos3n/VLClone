@@ -16,6 +16,9 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "open_disc": ("Open disc", ["Ctrl+D"]),
     "open_capture": ("Open capture device", ["Ctrl+C"]),
     "media_library": ("Media library", ["Ctrl+Shift+L"]),
+    "convert": ("Convert / save", ["Ctrl+R"]),
+    "stream": ("Stream", ["Ctrl+S"]),
+    "conversions": ("Conversion queue", []),
     "load_subtitle": ("Load subtitle file", []),
     "quit": ("Quit", ["Ctrl+Q"]),
     # Playback
@@ -39,6 +42,7 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "ab_loop": ("A-B loop", ["Shift+L"]),
     "cycle_repeat": ("Repeat mode", ["L"]),
     "toggle_shuffle": ("Shuffle", ["R"]),
+    "record": ("Record", ["Shift+R"]),
     # Chapters, titles and disc menus
     "next_chapter": ("Next chapter", ["Shift+N"]),
     "previous_chapter": ("Previous chapter", ["Shift+P"]),

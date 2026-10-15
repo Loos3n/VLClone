@@ -16,6 +16,7 @@ from collections import OrderedDict
 
 from .backend import (NAVIGATE_ACTIONS, CaptureDevice, Chapter, MediaBackend, MediaInfo, PlaybackState,
                       StreamInfo, TitleInfo, Track)
+from .converter import TranscodeEngine
 from .effects import EQ_BANDS, EngineFilters
 
 
@@ -893,3 +894,109 @@ class VlcMediaProbe:
         tw, th = size
         write_png(out_path, tw, th, bgra_to_rgb(data, tw, th, tw * 4))
         return True
+
+
+class VlcTranscoder(TranscodeEngine):
+    """Conversions, recordings and HTTP streaming on a separate libVLC instance.
+
+    Implements ``converter.TranscodeEngine``: each job is a media player
+    whose media carries a ``:sout=`` chain, so nothing is shown or heard and
+    the main player is never touched. Several jobs can run at once.
+    """
+
+    PARSE_TIMEOUT_MS = 5000
+
+    def __init__(self, args: list[str] | None = None) -> None:
+        self.vlc = import_vlc()
+        base = ["--quiet", "--no-video-title-show", "--no-sub-autodetect-file", "--no-stats",
+                "--no-metadata-network-access"]
+        if sys.platform.startswith("linux"):
+            base.append("--no-xlib")
+        self.instance = self.vlc.Instance(base + list(args or []))
+        if self.instance is None:
+            raise LibVlcNotFound("libVLC failed to initialise for conversions")
+        self._jobs: list[tuple[object, object]] = []
+        vlc = self.vlc
+        self._states = {vlc.State.NothingSpecial: "opening", vlc.State.Opening: "opening",
+                        vlc.State.Buffering: "running", vlc.State.Playing: "running",
+                        vlc.State.Paused: "running", vlc.State.Stopped: "ended",
+                        vlc.State.Ended: "ended", vlc.State.Error: "error"}
+
+    def start(self, mrl: str, options: list[str]):
+        media = self.instance.media_new(mrl)
+        for opt in options:
+            media.add_option(opt)
+        player = self.instance.media_player_new()
+        player.set_media(media)
+        handle = (player, media)
+        self._jobs.append(handle)
+        if player.play() != 0:
+            raise RuntimeError("libVLC refused to start the job")
+        return handle
+
+    def poll(self, handle):
+        from .converter import EngineStatus
+
+        player = handle[0]
+        return EngineStatus(self._states.get(player.get_state(), "opening"), player.get_time(), player.get_length())
+
+    def stop(self, handle) -> None:
+        if handle not in self._jobs:
+            return
+        self._jobs.remove(handle)
+        player, media = handle
+        player.stop()  # closes the stream output: muxers write their index here
+        player.release()
+        media.release()
+
+    def media_info(self, path_or_mrl: str):
+        from .media_sources import is_url
+        from .transcode import SourceInfo
+
+        vlc = self.vlc
+        local = not is_url(path_or_mrl)
+        media = self.instance.media_new_path(path_or_mrl) if local else self.instance.media_new(path_or_mrl)
+        try:
+            media.parse_with_options(vlc.MediaParseFlag.local if local else vlc.MediaParseFlag.network,
+                                     self.PARSE_TIMEOUT_MS)
+            deadline = time.monotonic() + self.PARSE_TIMEOUT_MS / 1000 + 1
+            while media.get_parsed_status() == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            info = SourceInfo(duration_ms=media.get_duration())
+            for t in _read_tracks(vlc, media):
+                code = _fourcc(t["codec"])
+                if t["type"] == 1:
+                    info.video.append(code)
+                elif t["type"] == 0:
+                    info.audio.append(code)
+                elif t["type"] == 2:
+                    info.subtitles += 1
+            return info
+        finally:
+            media.release()
+
+    def has_module(self, name: str) -> bool | None:
+        core = _load_libvlccore(self.vlc)
+        if core is None:
+            return None
+        try:
+            fn = core.module_exists
+            fn.restype = ctypes.c_bool
+            fn.argtypes = [ctypes.c_char_p]
+            return bool(fn(name.encode()))
+        except Exception:
+            return None
+
+    def version(self) -> str:
+        return _decode(self.vlc.libvlc_get_version())
+
+    def release(self) -> None:
+        for handle in list(self._jobs):
+            try:
+                self.stop(handle)
+            except Exception:
+                pass
+        try:
+            self.instance.release()
+        except Exception:
+            pass
