@@ -11,6 +11,7 @@ from vlclone.core.backend import PlaybackState  # noqa: E402
 from vlclone.core.controller import PlayerController  # noqa: E402
 from vlclone.core.fake_backend import FakeBackend  # noqa: E402
 from vlclone.core.settings import Settings  # noqa: E402
+from vlclone.core.shortcuts import DEFAULT_SHORTCUTS  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -156,7 +157,7 @@ def test_settings_dialog_applies(window, app):
     dlg.accept()
     assert window.settings.controls_hide_delay_ms == 5000
     assert window.overlay.hide_delay_ms == 5000
-    assert window.settings.shortcuts["play_pause"] == ["K", "Media Play"]
+    assert window.settings.shortcuts["play_pause"] == ["K"] + DEFAULT_SHORTCUTS["play_pause"][1][1:]
     assert any(k.toString() == "K" for k in window.actions.get("play_pause").shortcuts())
     assert window.ctl.max_volume == 125
 
