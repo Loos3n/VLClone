@@ -9,6 +9,8 @@ import ctypes
 import os
 import struct
 import sys
+import threading
+import time
 
 from collections import OrderedDict
 
@@ -743,3 +745,130 @@ class VlcBackend(MediaBackend):
 
     def engine_version(self) -> str:
         return _decode(self.vlc.libvlc_get_version())
+
+
+class VlcMediaProbe:
+    """Media-library metadata and thumbnails through libVLC (a ``MetadataProbe``).
+
+    Uses its own libVLC instance on the library's worker thread. Metadata
+    comes from libVLC's local preparser (tags + demuxer: duration, tracks);
+    thumbnails decode one frame into memory through libVLC's "vmem" video
+    callbacks, so no window or video output is needed. (libVLC 3 has no
+    thumbnailer API; VLC 4 adds one.)
+    """
+
+    PARSE_TIMEOUT_MS = 5000
+    FRAME_TIMEOUT_S = 6.0
+
+    def __init__(self, args: list[str] | None = None) -> None:
+        self.vlc = import_vlc()
+        base = ["--quiet", "--no-video-title-show", "--no-sub-autodetect-file", "--aout=dummy",
+                "--avcodec-hw=none", "--no-stats"]
+        if sys.platform.startswith("linux"):
+            base.append("--no-xlib")
+        self.instance = self.vlc.Instance(base + list(args or []))
+        if self.instance is None:
+            raise LibVlcNotFound("libVLC failed to initialise for the media library")
+
+    def close(self) -> None:
+        try:
+            self.instance.release()
+        except Exception:
+            pass
+
+    def _parse(self, path: str):
+        vlc = self.vlc
+        media = self.instance.media_new_path(path)
+        media.parse_with_options(vlc.MediaParseFlag.local, self.PARSE_TIMEOUT_MS)
+        deadline = time.monotonic() + self.PARSE_TIMEOUT_MS / 1000 + 1
+        while media.get_parsed_status() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return media
+
+    def probe(self, path: str):
+        from .library import MediaMeta
+
+        vlc = self.vlc
+        media = self._parse(path)
+        try:
+            def meta(key: str) -> str:
+                return _decode(media.get_meta(getattr(vlc.Meta, key)))
+
+            info = MediaMeta(title=meta("Title"), artist=meta("Artist"), album=meta("Album"),
+                             album_artist=meta("AlbumArtist"), genre=meta("Genre"), year=meta("Date"),
+                             duration_ms=media.get_duration())
+            try:
+                info.track = int((meta("TrackNumber") or "0").split("/")[0] or 0)
+            except ValueError:
+                info.track = 0
+            try:
+                tracks = _read_tracks(vlc, media)
+            except Exception:
+                tracks = []
+            video = next((t for t in tracks if t["type"] == 1 and t.get("width")), None)
+            if video:
+                info.width, info.height, info.has_video = video["width"], video["height"], True
+            return info
+        finally:
+            media.release()
+
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+        from .png import bgra_to_rgb, write_png
+
+        vlc = self.vlc
+        info = self.probe(path)
+        if not info.width or not info.height:
+            return False
+        width = max(16, min(width, info.width)) // 2 * 2
+        height = max(2, int(round(width * info.height / info.width)) // 2 * 2)
+        pitch = width * 4
+        buf = (ctypes.c_ubyte * (pitch * height))()
+        state = {"frames": 0, "data": None}
+        lock = threading.Lock()
+
+        @vlc.CallbackDecorators.VideoLockCb
+        def on_lock(opaque, planes):
+            planes[0] = ctypes.cast(buf, ctypes.c_void_p)
+            return None
+
+        @vlc.CallbackDecorators.VideoUnlockCb
+        def on_unlock(opaque, picture, planes):
+            pass
+
+        @vlc.CallbackDecorators.VideoDisplayCb
+        def on_display(opaque, picture):
+            with lock:
+                state["frames"] += 1
+                if state["frames"] >= 2:  # the first frame after a seek can be a stale one
+                    state["data"] = bytes(buf)
+
+        player = self.instance.media_player_new()
+        player.video_set_callbacks(on_lock, on_unlock, on_display, None)
+        player.video_set_format("RV32", width, height, pitch)
+        media = self.instance.media_new_path(path)
+        duration = duration_ms if duration_ms and duration_ms > 0 else info.duration_ms
+        if duration and duration > 0:
+            # A third in, capped so long films don't need a far seek; skips black intros.
+            media.add_option(f":start-time={min(duration * 0.33, 300_000) / 1000:.2f}")
+        for opt in (":no-audio", ":no-spu", ":input-fast-seek"):
+            media.add_option(opt)
+        player.set_media(media)
+        try:
+            player.play()
+            deadline = time.monotonic() + self.FRAME_TIMEOUT_S
+            while time.monotonic() < deadline:
+                with lock:
+                    if state["data"] is not None:
+                        break
+                if player.get_state() in (vlc.State.Error, vlc.State.Ended):
+                    break
+                time.sleep(0.02)
+        finally:
+            player.stop()
+            player.release()
+            media.release()
+        data = state["data"]
+        if data is None:
+            return False
+        write_png(out_path, width, height, bgra_to_rgb(data, width, height, pitch))
+        return True

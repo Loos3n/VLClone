@@ -45,6 +45,16 @@ class ResumeStore:
         self._data[mrl] = {"pos": int(position_ms), "len": int(length_ms or 0), "t": time.time()}
         self._dirty = True
 
+    def entries(self) -> dict[str, tuple[int, int, float]]:
+        """mrl -> (position ms, length ms, last update time) for every resumable item."""
+        result = {}
+        for mrl, entry in self._data.items():
+            if isinstance(entry, dict) and isinstance(entry.get("pos"), (int, float)) and entry["pos"] > 0:
+                length = entry.get("len") if isinstance(entry.get("len"), (int, float)) else 0
+                stamp = entry.get("t") if isinstance(entry.get("t"), (int, float)) else 0.0
+                result[mrl] = (int(entry["pos"]), int(length), float(stamp))
+        return result
+
     def forget(self, mrl: str) -> None:
         if self._data.pop(mrl, None) is not None:
             self._dirty = True

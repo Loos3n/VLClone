@@ -274,3 +274,44 @@ class FakeBackend(MediaBackend):
 
     def engine_version(self) -> str:
         return "fake 0.0"
+
+
+class FakeProbe:
+    """Deterministic media-library probe (a ``MetadataProbe``) for tests and ``--fake-backend``.
+
+    Metadata comes from ``metadata[path]`` when given, else from the file
+    name ("Artist - Title"); thumbnails are tiny solid PNGs. Counts calls so
+    tests can check that unchanged files are not probed again.
+    """
+
+    def __init__(self, metadata: dict | None = None, fail_thumbnails: set | None = None) -> None:
+        self.metadata = metadata or {}
+        self.fail_thumbnails = fail_thumbnails or set()
+        self.probed: list[str] = []
+        self.thumbnailed: list[str] = []
+        self.closed = False
+
+    def probe(self, path: str):
+        from .library_scanner import FilenameProbe
+
+        self.probed.append(path)
+        meta = self.metadata.get(path)
+        if meta is None:
+            meta = FilenameProbe().probe(path)
+            if meta.has_video:
+                meta.width, meta.height, meta.duration_ms = 1280, 720, 90_000
+            else:
+                meta.duration_ms = 180_000
+        return meta
+
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+        from .png import write_png
+
+        self.thumbnailed.append(path)
+        if path in self.fail_thumbnails:
+            return False
+        write_png(out_path, 4, 2, bytes([200, 80, 20]) * 8)
+        return True
+
+    def close(self) -> None:
+        self.closed = True
