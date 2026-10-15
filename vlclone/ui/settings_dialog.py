@@ -212,6 +212,8 @@ class SettingsDialog(BaseDialog):
         f.heading("Opening")
         f.toggle("play_on_open", "Start playing when files are opened")
         f.toggle("recursive_folders", "Include sub-folders when opening a folder")
+        f.toggle("restore_playlist", "Restore the playlist on launch",
+                 "The last session's playlist comes back; press Space to continue.")
         f.heading("Resume")
         f.toggle("resume_playback", "Continue where I left off", "Remembers the position of each file.")
         f.spin("resume_min_seconds", "Only after watching at least", 0, 600, " s")
@@ -231,6 +233,11 @@ class SettingsDialog(BaseDialog):
         f.combo("max_volume", "Maximum volume", [("100 %", 100), ("125 %", 125), ("150 %", 150), ("200 %", 200)],
                 "Above 100 % amplifies the sound (may distort).")
         f.spin("volume_step", "Volume step", 1, 25, " %")
+        f.heading("Effects")
+        f.combo("effects_scope", "Effect settings apply to",
+                [("Every file", "global"), ("Each file separately", "per_file")],
+                "Equalizer, normalization, stereo mode, image adjust, flip and sharpen. "
+                "Per file: each file remembers its own; new files start from the global set.")
         f.heading("Engine", "These apply the next time VLClone starts.")
         f.toggle("hardware_decoding", "Hardware-accelerated decoding", "Uses the GPU when possible.")
         f.text("preferred_audio_language", "Preferred audio language", "e.g. en, ja", width=160)

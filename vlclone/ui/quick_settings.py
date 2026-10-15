@@ -36,6 +36,66 @@ def section(text: str) -> QLabel:
     return lbl
 
 
+def badge(kind: str = "reload") -> QLabel:
+    """Small pill that tells whether a control applies live or reloads the media."""
+    if kind == "live":
+        lbl = QLabel("● live")
+        lbl.setObjectName("LiveBadge")
+        lbl.setToolTip("Applies instantly while playing")
+    else:
+        lbl = QLabel("↻ reloads")
+        lbl.setObjectName("ReloadBadge")
+        lbl.setToolTip("libVLC applies this filter when the media loads, so the video reloads at "
+                       "the same position about half a second after your last change")
+    return lbl
+
+
+def section_row(text: str, kind: str = "reload") -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addWidget(section(text))
+    row.addWidget(badge(kind), 0, Qt.AlignVCenter)
+    row.addStretch(1)
+    return row
+
+
+class ValueSlider(QWidget):
+    """Horizontal slider for a float value, with a live value label."""
+
+    def __init__(self, lo: float, hi: float, scale: float, on_change: Callable[[float], None],
+                 fmt: Callable[[float], str] = lambda v: f"{v:.2f}") -> None:
+        super().__init__()
+        self.scale = scale
+        self.fmt = fmt
+        self.on_change = on_change
+        self._updating = False
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(int(round(lo * scale)), int(round(hi * scale)))
+        self.slider.setFocusPolicy(Qt.NoFocus)
+        self.slider.valueChanged.connect(self._moved)
+        self.label = QLabel()
+        self.label.setObjectName("ValueLabel")
+        self.label.setMinimumWidth(44)
+        self.label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lay.addWidget(self.slider, 1)
+        lay.addWidget(self.label)
+
+    def _moved(self, raw: int) -> None:
+        value = raw / self.scale
+        self.label.setText(self.fmt(value))
+        if not self._updating:
+            self.on_change(value)
+
+    def set_value(self, value: float) -> None:
+        self._updating = True
+        self.slider.setValue(int(round(value * self.scale)))
+        self.label.setText(self.fmt(value))
+        self._updating = False
+
+
 def chip_grid(options: list[tuple[str, object]], on_pick: Callable[[object], None],
               columns: int = 5) -> tuple[QWidget, dict]:
     """A grid of exclusive chips; returns (widget, value -> button)."""
@@ -174,7 +234,8 @@ class QuickSettings(QWidget):
 
         self.add_page("playback", "Playback", PlaybackPage(ctl))
         for sig in (ctl.rate_changed, ctl.ab_changed, ctl.repeat_changed, ctl.shuffle_changed,
-                    ctl.tracks_changed, ctl.delays_changed, ctl.video_changed, ctl.media_changed):
+                    ctl.tracks_changed, ctl.delays_changed, ctl.video_changed, ctl.media_changed,
+                    ctl.effects_changed):
             sig.connect(lambda *_: self._refresh_if_visible())
 
     def add_page(self, key: str, title: str, page: Page) -> None:
@@ -343,7 +404,7 @@ class TrackList(QWidget):
 
 
 class AudioPage(Page):
-    def __init__(self, ctl: PlayerController) -> None:
+    def __init__(self, ctl: PlayerController, open_effects: Callable[[], None] | None = None) -> None:
         super().__init__(ctl)
         self.lay.addWidget(section("Audio track"))
         self.tracks = TrackList(ctl.set_audio_track, "No audio tracks")
@@ -354,6 +415,11 @@ class AudioPage(Page):
         hint = QLabel("Positive values delay the sound (J / K).")
         hint.setObjectName("Muted")
         self.lay.addWidget(hint)
+        if open_effects:
+            effects = chip("Equalizer & audio effects…", checkable=False)
+            effects.setToolTip("Ctrl+Shift+E")
+            effects.clicked.connect(open_effects)
+            self.lay.addWidget(effects)
         self.lay.addStretch(1)
 
     def refresh(self) -> None:
@@ -387,8 +453,10 @@ class SubtitlesPage(Page):
 
 
 class VideoPage(Page):
-    def __init__(self, ctl: PlayerController, snapshot: Callable[[], None]) -> None:
+    def __init__(self, ctl: PlayerController, snapshot: Callable[[], None],
+                 open_effects: Callable[[], None] | None = None) -> None:
         super().__init__(ctl)
+        from ..core.effects import SHARPEN_MAX, SHARPEN_MIN
         from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS,
                                        ZOOM_LEVELS, zoom_label)
 
@@ -399,18 +467,36 @@ class VideoPage(Page):
         grid, self.crop = chip_grid([(r or "None", r) for r in CROP_RATIOS], ctl.set_crop, 5)
         self.lay.addWidget(grid)
 
-        row = QHBoxLayout()
-        row.setSpacing(16)
-        zoom_col = QVBoxLayout()
-        zoom_col.addWidget(section("Zoom"))
+        self.lay.addWidget(section("Zoom"))
         grid, self.zoom = chip_grid([(zoom_label(z), z) for z in ZOOM_LEVELS], ctl.set_zoom, 5)
-        zoom_col.addWidget(grid)
-        row.addLayout(zoom_col)
-        self.lay.addLayout(row)
-
-        self.lay.addWidget(section("Rotate"))
-        grid, self.rotation = chip_grid([(f"{r}°", r) for r in ROTATIONS], ctl.set_rotation, 4)
         self.lay.addWidget(grid)
+
+        self.lay.addLayout(section_row("Rotate & flip"))
+        transform = QHBoxLayout()
+        transform.setSpacing(6)
+        grid, self.rotation = chip_grid([(f"{r}°", r) for r in ROTATIONS], ctl.set_rotation, 4)
+        transform.addWidget(grid, 4)
+        self.flip_h = chip("⇆ Flip")
+        self.flip_h.setToolTip("Mirror horizontally")
+        self.flip_h.clicked.connect(lambda on: ctl.set_flip(horizontal=on))
+        self.flip_v = chip("⇅ Flip")
+        self.flip_v.setToolTip("Mirror vertically")
+        self.flip_v.clicked.connect(lambda on: ctl.set_flip(vertical=on))
+        transform.addWidget(self.flip_h, 1)
+        transform.addWidget(self.flip_v, 1)
+        self.lay.addLayout(transform)
+
+        self.lay.addLayout(section_row("Sharpen"))
+        sharpen = QHBoxLayout()
+        sharpen.setSpacing(8)
+        self.sharpen = chip("Off")
+        self.sharpen.setFixedWidth(56)
+        self.sharpen.clicked.connect(ctl.set_sharpen)
+        self.sharpen_strength = ValueSlider(SHARPEN_MIN, SHARPEN_MAX, 100, ctl.set_sharpen_strength)
+        self.sharpen_strength.setToolTip("Sharpen strength (libVLC sigma)")
+        sharpen.addWidget(self.sharpen)
+        sharpen.addWidget(self.sharpen_strength, 1)
+        self.lay.addLayout(sharpen)
 
         self.lay.addWidget(section("Deinterlace"))
         labels = {None: "Off", "x": "X", "yadif2x": "Yadif 2×", "ivtc": "IVTC"}
@@ -425,7 +511,18 @@ class VideoPage(Page):
         reset.clicked.connect(ctl.reset_video)
         actions.addWidget(shot, 1)
         actions.addWidget(reset, 1)
+        if open_effects:
+            effects = chip("Effects…", checkable=False)
+            effects.setToolTip("Image adjust, equalizer and audio effects (Ctrl+Shift+E)")
+            effects.clicked.connect(open_effects)
+            actions.addWidget(effects, 1)
         self.lay.addLayout(actions)
+        self.pending = QLabel("↻ Applying filter changes…")
+        self.pending.setObjectName("ReloadBadge")
+        self.pending.setAlignment(Qt.AlignCenter)
+        self.pending.setVisible(False)
+        ctl.reload_pending.connect(self.pending.setVisible)
+        self.lay.addWidget(self.pending)
         self.lay.addStretch(1)
 
     def refresh(self) -> None:
@@ -434,3 +531,9 @@ class VideoPage(Page):
                                (self.rotation, v.rotation), (self.deinterlace, v.deinterlace)):
             if value in buttons:
                 buttons[value].setChecked(True)
+        fx = self.ctl.effects.video
+        self.flip_h.setChecked(fx.flip_h)
+        self.flip_v.setChecked(fx.flip_v)
+        self.sharpen.setChecked(fx.sharpen)
+        self.sharpen.setText("On" if fx.sharpen else "Off")
+        self.sharpen_strength.set_value(fx.sharpen_strength)

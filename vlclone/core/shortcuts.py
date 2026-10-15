@@ -55,10 +55,13 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "cycle_zoom": ("Cycle zoom", ["Z"]),
     "cycle_deinterlace": ("Cycle deinterlace mode", ["D"]),
     "rotate": ("Rotate 90°", ["Ctrl+Alt+R"]),
+    "flip_horizontal": ("Flip horizontally", []),
+    "flip_vertical": ("Flip vertically", []),
     "snapshot": ("Take snapshot", ["Shift+S"]),
     # Interface
     "toggle_playlist": ("Toggle playlist", ["Ctrl+L"]),
     "quick_settings": ("Quick settings", ["Ctrl+E"]),
+    "effects": ("Effects & filters", ["Ctrl+Shift+E"]),
     "media_info": ("Media information", ["Ctrl+I", "Ctrl+J"]),
     "settings": ("Settings", ["Ctrl+P"]),
     "show_time": ("Show position", ["T"]),

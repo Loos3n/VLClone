@@ -22,12 +22,27 @@ def app():
     return application
 
 
+@pytest.fixture(autouse=True)
+def _no_blocking_dialogs(monkeypatch):
+    """A message box in an offscreen test would block forever: fail instead."""
+    from PySide6.QtWidgets import QMessageBox
+
+    def boom(*args, **kwargs):
+        raise AssertionError(f"unexpected message box: {args[1:3]}")
+
+    for name in ("warning", "critical", "information", "question"):
+        monkeypatch.setattr(QMessageBox, name, boom)
+
+
 @pytest.fixture
 def window(app, tmp_path):
     from vlclone.ui.main_window import MainWindow
 
+    from vlclone.core.effects import EffectsStore, EqPresetStore
+
     settings = Settings(snapshot_dir=str(tmp_path))
-    ctl = PlayerController(FakeBackend(), settings)
+    ctl = PlayerController(FakeBackend(), settings, effects_store=EffectsStore(tmp_path / "fx.json"),
+                           eq_presets=EqPresetStore(tmp_path / "eq.json"))
     win = MainWindow(ctl, settings)
     win.show()
     app.processEvents()
@@ -154,3 +169,102 @@ def test_default_key_strings_parse_in_qt(app):
     for action, keys in resolve_shortcuts().items():
         for key in keys:
             assert QKeySequence(key).toString() == key, (action, key)
+
+
+# ------------------------------------------------------------------ phase 2
+def test_effects_shortcut_registered_without_conflicts(window):
+    from vlclone.core.shortcuts import find_conflicts, resolve_shortcuts
+
+    assert [k.toString() for k in window.actions.get("effects").shortcuts()] == ["Ctrl+Shift+E"]
+    assert find_conflicts(resolve_shortcuts()) == {}
+
+
+def test_effects_panel_drives_controller(window, app, monkeypatch):
+    ctl = window.ctl
+    ctl.open(["http://x/clip.mp4"])
+    window._tick()
+    window.actions.trigger("effects")
+    app.processEvents()
+    panel = window.effects_panel
+    assert panel.isVisible()
+
+    eq = panel.pages["equalizer"]
+    index = eq.presets.findData("Rock")
+    eq.presets.setCurrentIndex(index)
+    eq.presets.activated.emit(index)
+    assert ctl.backend.equalizer[1][0] == 8.0
+    eq.bands[2].slider.setValue(55)
+    assert ctl.backend.equalizer[1][2] == 5.5
+    assert eq.presets.currentText() == "Custom"
+
+    from PySide6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Bass boost", True))
+    eq._save_preset()
+    assert "Bass boost" in ctl.custom_eq_presets()
+    assert eq.presets.currentText() == "Bass boost" and eq.delete.isEnabled()
+
+    panel.show_page("audio")
+    audio = panel.pages["audio"]
+    audio.stereo["mono"].click()
+    assert ctl.backend.stereo_mode == 7
+    audio.normalize.setChecked(True)
+    assert ctl.backend.normalization[0] is True
+
+    panel.show_page("image")
+    image = panel.pages["image"]
+    image.sliders["brightness"].slider.setValue(150)
+    assert ctl.backend.adjust["brightness"] == 1.5
+    image.sliders["gamma"].slider.setValue(30)  # log scale: 10**0.3
+    assert abs(ctl.backend.adjust["gamma"] - 1.995) < 0.01
+
+    loads = len(ctl.backend.loads)
+    window.actions.trigger("leave_fullscreen")  # Esc closes the panel first
+    assert not panel.isVisible()
+    assert len(ctl.backend.loads) == loads  # nothing above needed a reload
+
+
+def test_video_page_flip_and_sharpen_marked_and_batched(window, app):
+    ctl = window.ctl
+    ctl.open(["http://x/clip.mp4"])
+    window._tick()
+    window.open_quick_settings("video")
+    app.processEvents()
+    page = window.quick.pages["video"]
+    assert page.findChildren(type(page.pending), "ReloadBadge")
+    loads = len(ctl.backend.loads)
+    page.flip_h.click()
+    page.sharpen.click()
+    page.sharpen_strength.slider.setValue(120)
+    assert page.pending.isVisibleTo(page)
+    assert len(ctl.backend.loads) == loads
+    ctl.apply_pending_reload()
+    assert len(ctl.backend.loads) == loads + 1
+    assert ctl.backend.pending_filters.transform == "hflip" and ctl.backend.pending_filters.sharpen == 1.2
+    assert not page.pending.isVisibleTo(page)
+    window.quick.hide()
+
+
+def test_menus_include_effects(window):
+    window.ctl.open(["http://x/clip.mp4"])
+    window._tick()
+    menu = window.build_menu()
+    titles = []
+
+    def walk(m):
+        for act in m.actions():
+            titles.append(act.text())
+            if act.menu():
+                walk(act.menu())
+
+    walk(menu)
+    for expected in ("Equalizer", "Rock", "Stereo mode", "Mono", "Volume normalization", "Flip horizontally",
+                     "Sharpen", "Effects & filters…"):
+        assert expected in titles, expected
+
+
+def test_settings_scope_switch_goes_through_controller(window):
+    window.ctl.set_adjust("gamma", 2.0)
+    window.settings.effects_scope = "per_file"
+    window.apply_settings()
+    assert window.ctl.settings.effects_scope == "per_file"
+    assert window.ctl.settings.effects["video"]["gamma"] == 2.0

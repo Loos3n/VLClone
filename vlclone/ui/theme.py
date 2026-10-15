@@ -182,6 +182,33 @@ QSlider::handle:horizontal {{
     background: {TEXT}; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
 }}
 
+QSlider::groove:vertical {{ width: 4px; background: {SURFACE_3}; border-radius: 2px; }}
+QSlider::add-page:vertical {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::sub-page:vertical {{ background: {SURFACE_3}; border-radius: 2px; }}
+QSlider::handle:vertical {{
+    background: {TEXT}; width: 14px; height: 14px; margin: 0 -5px; border-radius: 7px;
+}}
+QSlider::handle:hover {{ background: #ffffff; }}
+QSlider:disabled {{ }}
+QSlider::sub-page:horizontal:disabled, QSlider::add-page:vertical:disabled {{ background: {TEXT_FAINT}; }}
+QLabel#ReloadBadge {{
+    color: {ACCENT_HOVER};
+    background: {ACCENT_SOFT};
+    border-radius: 8px;
+    padding: 1px 7px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+QLabel#LiveBadge {{
+    color: #7fd88f;
+    background: rgba(127, 216, 143, 0.14);
+    border-radius: 8px;
+    padding: 1px 7px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+QLabel#ValueLabel {{ color: {TEXT_MUTED}; font-size: 8.5pt; }}
+
 /* Panels */
 #Sidebar {{
     background: {SURFACE};

@@ -12,6 +12,7 @@ from .. import APP_NAME
 from ..core.backend import PlaybackState
 from ..core.controller import (ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, ROTATIONS, ZOOM_LEVELS,
                                PlayerController, zoom_label)
+from ..core.effects import STEREO_MODES
 from ..core.m3u import write_m3u
 from ..core.media_sources import (AUDIO_EXTENSIONS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS,
                                   VIDEO_EXTENSIONS, is_subtitle_file, mrl_to_path)
@@ -22,6 +23,7 @@ from ..core.timefmt import format_ms
 from .actions import ActionRegistry
 from .dialogs import JumpToTimeDialog, OpenUrlDialog
 from .icons import icon
+from .effects_panel import EffectsPanel
 from .media_info import MediaInfoDialog
 from .overlay import OverlayWindow
 from .playlist_panel import PlaylistPanel
@@ -88,6 +90,9 @@ class MainWindow(QMainWindow):
         self.quick = QuickSettings(controller, self)
         self.quick.closed.connect(lambda: self.overlay.pin("popover", False))
         self.extend_quick_settings(self.quick)
+        self.effects_panel = EffectsPanel(controller, lambda: self.open_quick_settings("video"), self)
+        self.effects_panel.closed.connect(lambda: self.overlay.pin("effects", False))
+        self._effects_scope = settings.effects_scope
 
         self._fullscreen_restore_sidebar = False
         self._was_maximized = False
@@ -114,9 +119,9 @@ class MainWindow(QMainWindow):
     # Hook for later feature pages (tracks, video...). Kept separate so the
     # popover can grow without touching the window setup.
     def extend_quick_settings(self, quick: QuickSettings) -> None:
-        quick.add_page("audio", "Audio", AudioPage(self.ctl))
+        quick.add_page("audio", "Audio", AudioPage(self.ctl, lambda: self.open_effects("equalizer")))
         quick.add_page("subtitles", "Subtitles", SubtitlesPage(self.ctl, self.load_subtitle_dialog))
-        quick.add_page("video", "Video", VideoPage(self.ctl, self.take_snapshot))
+        quick.add_page("video", "Video", VideoPage(self.ctl, self.take_snapshot, lambda: self.open_effects("image")))
 
     # ================================================================ actions
     def _register_actions(self) -> None:
@@ -182,6 +187,9 @@ class MainWindow(QMainWindow):
         a.register("cycle_deinterlace", c.cycle_deinterlace)
         a.register("rotate", c.rotate)
         a.register("snapshot", self.take_snapshot)
+        a.register("effects", lambda: self.open_effects())
+        a.register("flip_horizontal", c.toggle_flip_horizontal, "Flip horizontally")
+        a.register("flip_vertical", c.toggle_flip_vertical, "Flip vertically")
         a.register("media_info", self.show_media_info)
         a.register("settings", self.show_settings)
 
@@ -355,6 +363,9 @@ class MainWindow(QMainWindow):
         if popup is not None:
             popup.close()
             return
+        if self.effects_panel.isVisible():
+            self.effects_panel.hide()
+            return
         if not self.isFullScreen():
             return
         if self._was_maximized:
@@ -449,8 +460,17 @@ class MainWindow(QMainWindow):
             self.ctl.open([path], play=False)
 
     # ============================================================ popovers
+    def open_effects(self, page: str | None = None) -> None:
+        """Toggle the Effects & filters panel (Ctrl+Shift+E)."""
+        if self.effects_panel.isVisible() and page is None:
+            self.effects_panel.hide()
+            return
+        self.quick.hide()
+        self.overlay.pin("effects", True)
+        self.effects_panel.popup(self.overlay.anchor("quick_settings"), page)
+
     def open_quick_settings(self, page: str | None = None, anchor: str = "quick_settings") -> None:
-        if self.quick.isVisible():
+        if self.quick.isVisible() and page is None:
             self.quick.hide()
             return
         self.overlay.pin("popover", True)
@@ -543,6 +563,28 @@ class MainWindow(QMainWindow):
         audio.addSeparator()
         audio.addAction(a("audio_delay_down"))
         audio.addAction(a("audio_delay_up"))
+        audio.addSeparator()
+        fx = c.effects.audio
+        eq = audio.addMenu("Equalizer")
+        off = eq.addAction("Off", lambda: c.set_eq_enabled(False))
+        off.setCheckable(True)
+        off.setChecked(not fx.eq_enabled)
+        group = QActionGroup(eq)
+        group.addAction(off)
+        eq.addSeparator()
+        for name in [*c.builtin_eq_presets(), *c.custom_eq_presets()]:
+            act = eq.addAction(name, lambda n=name: c.apply_eq_preset(n))
+            act.setCheckable(True)
+            act.setChecked(fx.eq_enabled and fx.eq_preset == name)
+            group.addAction(act)
+        radio(audio.addMenu("Stereo mode"), [(label, key) for key, label, _ in STEREO_MODES],
+              fx.stereo_mode, c.set_stereo_mode)
+        norm = audio.addAction("Volume normalization", lambda: c.set_normalization(not fx.normalize))
+        norm.setCheckable(True)
+        norm.setChecked(fx.normalize)
+        norm.setEnabled(c.backend.supports_normalization)
+        audio.addAction(icon("sliders"), "Effects & filters…", lambda: self.open_effects("equalizer")).setShortcut(
+            a("effects").shortcut())
 
         subs = menu.addMenu("Subtitles")
         subs.addAction(a("load_subtitle"))
@@ -563,8 +605,18 @@ class MainWindow(QMainWindow):
         radio(video.addMenu("Rotate"), [(f"{r}°", r) for r in ROTATIONS], c.video.rotation, c.set_rotation)
         radio(video.addMenu("Deinterlace"), [(m or "Off", m) for m in DEINTERLACE_MODES],
               c.video.deinterlace, c.set_deinterlace)
+        vfx = c.effects.video
+        for action_id, checked in (("flip_horizontal", vfx.flip_h), ("flip_vertical", vfx.flip_v)):
+            act = a(action_id)
+            act.setCheckable(True)
+            act.setChecked(checked)
+            video.addAction(act)
+        sharpen = video.addAction("Sharpen", lambda: c.set_sharpen(not vfx.sharpen))
+        sharpen.setCheckable(True)
+        sharpen.setChecked(vfx.sharpen)
         video.addSeparator()
         video.addAction(a("snapshot"))
+        video.addAction(icon("sliders"), "Effects & filters…", lambda: self.open_effects("image"))
         video.addAction("Reset video adjustments", c.reset_video)
 
     def show_media_info(self) -> None:
@@ -593,6 +645,10 @@ class MainWindow(QMainWindow):
         self.actions.get("always_on_top").setChecked(s.always_on_top)
         if self.ctl.resume:
             self.ctl.resume.min_position_ms = s.resume_min_seconds * 1000
+        if s.effects_scope != self._effects_scope:
+            new_scope, s.effects_scope = s.effects_scope, self._effects_scope
+            self.ctl.set_effects_scope(new_scope)
+            self._effects_scope = new_scope
         try:
             s.save()
         except OSError as exc:
@@ -621,6 +677,7 @@ class MainWindow(QMainWindow):
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.overlay.hide()
         self.quick.hide()
+        self.effects_panel.hide()
         super().closeEvent(e)
 
     # Drops onto the window chrome / sidebar area outside the overlay
