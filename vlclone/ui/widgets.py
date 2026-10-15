@@ -16,12 +16,13 @@ class IconButton(QToolButton):
     """Flat round button with a painted icon and a soft hover highlight."""
 
     def __init__(self, icon_name: str, tooltip: str = "", size: int = 36, icon_size: int = 22,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, color: str | None = None) -> None:
         super().__init__(parent)
         self._icon_name = icon_name
         self._hover = 0.0
         self._accent = False
-        self.setIcon(icon(icon_name))
+        self._color = color  # None = theme text; "@VIDEO_TEXT" on the always-dark video stage
+        self.setIcon(icon(icon_name, color))
         self.setIconSize(QSize(icon_size, icon_size))
         self.setFixedSize(size, size)
         self.setToolTip(tooltip)
@@ -35,13 +36,13 @@ class IconButton(QToolButton):
     def set_icon_name(self, name: str) -> None:
         if name != self._icon_name:
             self._icon_name = name
-            self.setIcon(icon(name, theme.ACCENT if self._accent else None))
+            self.setIcon(icon(name, "@ACCENT" if self._accent else self._color))
 
     def set_accent(self, on: bool) -> None:
         """Highlight the icon (used for active toggles like repeat or A-B)."""
         if on != self._accent:
             self._accent = on
-            self.setIcon(icon(self._icon_name, theme.ACCENT if on else None))
+            self.setIcon(icon(self._icon_name, "@ACCENT" if on else self._color))
 
     def _set_hover(self, v) -> None:
         self._hover = float(v)
@@ -65,7 +66,9 @@ class IconButton(QToolButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         if self._hover > 0 or self.isDown() or self._accent:
-            bg = QColor(255, 255, 255, int(26 * self._hover + (14 if self.isDown() else 0)))
+            on_dark = self._color is not None or theme.MODE == "dark"
+            bg = QColor(255, 255, 255) if on_dark else QColor(0, 0, 0)
+            bg.setAlpha(int(26 * self._hover + (14 if self.isDown() else 0)))
             if self._accent:
                 bg = QColor(theme.ACCENT)
                 bg.setAlpha(int(34 + 20 * self._hover))
@@ -83,6 +86,7 @@ class SeekSlider(QWidget):
     """Timeline with hover time preview, drag-to-seek, A-B and chapter markers."""
 
     seek_requested = Signal(int)  # ms
+    hovered = Signal(int)         # ms under the cursor (-1 when it leaves), for seek previews
 
     BUBBLE_SPACE = 30
     TRACK_ZONE = 18
@@ -175,10 +179,22 @@ class SeekSlider(QWidget):
         self._hover_x = None
         if not self._dragging:
             self._animate(0.0)
+        self.hovered.emit(-1)
         self.update()
+
+    def hover_ms(self) -> int:
+        """The time under the cursor (or being dragged to); -1 when not hovering."""
+        if self._hover_x is None or self._length <= 0:
+            return -1
+        return self._drag_ms if self._dragging else self._x_to_ms(self._hover_x)
+
+    def x_for(self, ms: int) -> float:
+        return self._ms_to_x(ms)
 
     def mouseMoveEvent(self, e) -> None:
         self._hover_x = e.position().x()
+        if self._length > 0:
+            self.hovered.emit(self._drag_ms if self._dragging else self._x_to_ms(self._hover_x))
         if self._dragging:
             self._drag_ms = self._x_to_ms(self._hover_x)
             self._position = self._drag_ms
@@ -271,9 +287,9 @@ class SeekSlider(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 6, 6)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(theme.SURFACE_3))
+        p.setBrush(QColor(theme.VIDEO_SURFACE))  # the seek bar lives on the video stage
         p.drawPath(path)
-        p.setPen(QColor(theme.TEXT))
+        p.setPen(QColor(theme.VIDEO_TEXT))
         p.drawText(rect, Qt.AlignCenter, text)
 
 
@@ -338,11 +354,11 @@ class VolumeSlider(QWidget):
         unity_x = r.left() + r.width() * 100 / self._max
         frac = min(self._value / self._max, 1.0)
         fill_x = r.left() + r.width() * frac
-        normal = QColor(theme.TEXT_MUTED if self._muted else theme.TEXT)
+        normal = QColor(theme.VIDEO_MUTED if self._muted else theme.VIDEO_TEXT)
         p.setBrush(normal)
         p.drawRoundedRect(QRectF(r.left(), r.top(), min(fill_x, unity_x) - r.left(), r.height()), 2, 2)
         if fill_x > unity_x:
-            boost = QColor(theme.ACCENT if not self._muted else theme.TEXT_MUTED)
+            boost = QColor(theme.ACCENT if not self._muted else theme.VIDEO_MUTED)
             p.setBrush(boost)
             p.drawRoundedRect(QRectF(unity_x, r.top(), fill_x - unity_x, r.height()), 2, 2)
         if self._max > 100:
@@ -357,10 +373,7 @@ class FadingLabel(QLabel):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("Osd")
-        self.setStyleSheet(
-            f"#Osd {{ background: {theme.OVERLAY_BG}; border-radius: 12px; padding: 8px 16px;"
-            f" font-size: 12pt; font-weight: 600; }}")
+        self.setObjectName("Osd")  # styled by the theme's style sheets
         self._effect = QGraphicsOpacityEffect(self, opacity=0.0)
         self.setGraphicsEffect(self._effect)
         self._anim = QPropertyAnimation(self._effect, b"opacity", self, duration=180)

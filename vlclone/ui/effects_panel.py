@@ -11,7 +11,7 @@ import math
 from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
                                QInputDialog, QLabel, QMessageBox, QPushButton, QSlider, QStackedWidget,
                                QVBoxLayout, QWidget)
@@ -22,6 +22,7 @@ from ..core.effects import (ADJUST_RANGES, EQ_BAND_FREQUENCIES, EQ_MAX_DB, EQ_MI
 from .icons import icon
 from .quick_settings import DelayControl, ValueSlider, badge, chip, chip_grid, section
 from .widgets import IconButton, ToggleSwitch
+from . import theme
 
 CUSTOM_LABEL = "Custom"
 
@@ -107,8 +108,8 @@ class EqualizerPage(QWidget):
         self.preamp = EqBand("Preamp", ctl.set_eq_preamp)
         bands.addWidget(self.preamp)
         line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setStyleSheet("color: #2b303b;")
+        line.setObjectName("VRule")
+        line.setFixedWidth(1)
         bands.addSpacing(6)
         bands.addWidget(line)
         bands.addSpacing(6)
@@ -331,7 +332,7 @@ class EffectsPanel(QWidget):
         self.frame = QFrame()
         self.frame.setObjectName("Popover")
         shadow = QGraphicsDropShadowEffect(self.frame, blurRadius=36, offset=QPoint(0, 8))
-        shadow.setColor(QColor(0, 0, 0, 150))
+        theme.popover_shadow(shadow)
         self.frame.setGraphicsEffect(shadow)
         outer.addWidget(self.frame)
         lay = QVBoxLayout(self.frame)

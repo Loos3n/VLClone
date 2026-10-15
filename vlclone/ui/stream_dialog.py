@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QLine
 
 from ..core.settings import Settings
 from ..core.streamer import STREAM_MODES, HttpStreamer
+from . import theme
 from .dialogs import BaseDialog
 from .quick_settings import chip
 
@@ -89,7 +90,7 @@ class StreamDialog(BaseDialog):
         mode = self.mode.currentData()
         error = self.streamer.start(mrl, options, title, position, mode, self.port.value())
         if error:
-            self.status.setStyleSheet("color: #ff5d5d;")
+            theme.set_error(self.status)
             self.status.setText(error)
             return
         self.settings.stream_mode, self.settings.stream_port = mode, self.port.value()
@@ -110,12 +111,12 @@ class StreamDialog(BaseDialog):
         self.url.setText(self.streamer.url() if active else "")
         self.copy.setEnabled(active)
         if state in ("starting", "streaming"):
-            self.status.setStyleSheet("")
+            theme.set_error(self.status, False)
             self.status.setText("● Streaming. Firewalls may ask to allow VLClone on your network."
                                 if state == "streaming" else "Starting…")
         elif state == "ended":
-            self.status.setStyleSheet("")
+            theme.set_error(self.status, False)
             self.status.setText("The stream ended (the media finished).")
         elif state == "error":
-            self.status.setStyleSheet("color: #ff5d5d;")
+            theme.set_error(self.status)
             self.status.setText(self.streamer.error)

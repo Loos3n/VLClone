@@ -110,13 +110,14 @@ class PlaylistDelegate(QStyledItemDelegate):
         if selected or hover or current:
             bg = QColor(theme.SURFACE_3 if selected else theme.SURFACE_2)
             if current and not selected:
-                bg = QColor(255, 138, 42, 30)
+                bg = QColor(theme.ACCENT)
+                bg.setAlpha(30)
             p.setPen(Qt.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(r, 8, 8)
         num_rect = QRect(r.left() + 6, r.top(), 26, r.height())
         if current:
-            icon("play", theme.ACCENT).paint(p, QRect(num_rect.left() + 4, r.center().y() - 7, 14, 14))
+            icon("play", "@ACCENT").paint(p, QRect(num_rect.left() + 4, r.center().y() - 7, 14, 14))
         else:
             p.setPen(QColor(theme.TEXT_FAINT))
             p.setFont(theme.app_font(9))
@@ -130,7 +131,7 @@ class PlaylistDelegate(QStyledItemDelegate):
         fm = QFontMetrics(font)
         dur_w = fm.horizontalAdvance(dur_text) + 8 if dur_text else 0
         text_rect = QRect(num_rect.right() + 4, r.top(), r.width() - num_rect.width() - dur_w - 16, r.height())
-        p.setPen(QColor(theme.ACCENT_HOVER if current else theme.TEXT))
+        p.setPen(QColor(theme.ACCENT_TEXT if current else theme.TEXT))
         p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft,
                    fm.elidedText(index.data(Qt.DisplayRole) or "", Qt.ElideMiddle, text_rect.width()))
         if dur_text:

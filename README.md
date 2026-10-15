@@ -3,8 +3,9 @@
 A modern, clean desktop media player built **on VLC's own engine**. Playback,
 codecs, formats, streaming protocols and subtitles are handled by libVLC (via
 [python-vlc](https://pypi.org/project/python-vlc/)), so compatibility matches
-VLC exactly. Only the interface is new: a dark, minimal UI where the video
-fills the window and the controls fade away while you watch.
+VLC exactly. Only the interface is new: a minimal UI (dark, light or following
+Windows, with your accent colour) where the video fills the window and the
+controls fade away while you watch.
 
 ![Playback with controls revealed](docs/screenshot.png)
 
@@ -13,23 +14,39 @@ fills the window and the controls fade away while you watch.
 
 ## Windows download (no Python needed)
 
-Every push builds Windows packages with GitHub Actions
-(`.github/workflows/windows-build.yml`). Open the repository's **Actions** tab →
-*Windows build* → the latest run → **Artifacts**, and download
-`VLClone-<version>-windows`. It contains:
+Releases are on the repository's **Releases** page: `VLClone-<version>-Setup.exe`
+and `VLClone-<version>-win64-portable.zip`.
 
-* `VLClone-<version>-Setup.exe`: installer (Start menu entry, optional desktop
-  icon, "Open with" registration, uninstaller).
-* `VLClone-<version>-win64-portable.zip`: unzip anywhere and run `VLClone.exe`.
-
-Artifacts are kept for 7 days. If the account's Actions artifact storage is
-full, run the workflow manually (*Run workflow* → tick *pre-release*) to get the
-files as a GitHub pre-release instead.
+* **Installer**: Start menu entry, optional desktop icon, uninstaller, and
+  opt-in tasks for **file types** (video / audio / playlists, unticked by
+  default) and the Explorer entries **Play with VLClone** / **Add to VLClone
+  playlist** (on Windows 11 under *Show more options*). Windows asks you to
+  confirm the default player in *Settings → Default apps* (the installer can
+  open it); VLClone only becomes the default by itself for types that had none.
+  Uninstalling removes every entry it made and leaves other players' alone.
+* **Portable zip**: unzip anywhere and run `VLClone.exe`; Settings → System →
+  *File types* registers the same entries for your user only.
 
 Both **bundle libVLC** (from the official VLC 3.0.21 win64 build, verified by
-SHA-256), so VLC does not need to be installed. Pushing a tag like `v0.1.0`
-also attaches both files to a GitHub release. The exe is unsigned, so Windows
+SHA-256), so VLC does not need to be installed. The exe is unsigned, so Windows
 SmartScreen may ask you to confirm the first launch (*More info → Run anyway*).
+
+**Making a release**: bump `__version__` in `vlclone/__init__.py` (the one place
+the version lives: About, the update check, the exe's version resource and the
+installer all read it), commit, then push a matching tag:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+The *Windows build* workflow checks that the tag matches `__version__`, builds,
+self-tests, and publishes a GitHub Release with both files and release notes
+generated from the commits since the previous `v*` tag
+(`packaging/release_notes.py`). Builds of ordinary pushes keep their files as
+workflow artifacts for 3 days only (Actions → *Windows build* → run →
+*Artifacts*); tag builds upload no artifact at all. If artifact storage is full,
+*Run workflow* → tick *pre-release* publishes a `build-N` pre-release instead
+(never offered by the update check).
 
 To build locally on Windows:
 
@@ -39,8 +56,9 @@ python packaging\fetch_vlc.py
 build\vlc\vlc-cache-gen.exe build\vlc\plugins
 python packaging\make_icon.py
 python packaging\make_version_info.py
+python packaging\make_associations.py            # file types for the installer
 pyinstaller packaging\vlclone.spec --noconfirm     # -> dist\VLClone\VLClone.exe
-iscc /DAppVersion=0.1.0 packaging\installer.iss     # optional installer (Inno Setup 6)
+iscc /DAppVersion=1.0.0 packaging\installer.iss     # optional installer (Inno Setup 6)
 ```
 
 Licensing note: the packages redistribute libVLC and VLC plugins, which are
@@ -206,8 +224,48 @@ manager is needed for the translucent controls (every modern desktop has one).
   last item selected (Settings → Playback; turn off to start empty).
 * **Media information** (`Ctrl+I`) shows metadata, codecs, resolution, frame
   rate, audio format and live bitrate/frame statistics.
-* **Settings** (`Ctrl+P`) is one short page: playback, audio & video, interface,
-  shortcut editor.
+* **Settings** (`Ctrl+P`) has seven short sections: *Playback*, *Audio & video*,
+  *Appearance*, *Library & files*, *System*, *Shortcuts*, *About*. The search
+  box filters every section at once (setting names, descriptions and
+  shortcuts); each section has *Reset … to defaults* (applied when you press
+  *Save*, so *Cancel* undoes it).
+* **Themes**: *Dark*, *Light* or *Follow system* (switches with Windows' app
+  mode), plus an accent colour (eight presets or any colour). Every panel,
+  dialog, menu and popover follows; the video area and its controls stay dark
+  in every theme, like other players. Chosen in Settings → Appearance or on the
+  welcome screen.
+* **One window** (Settings → System): opening files from Explorer or starting
+  VLClone again sends them to the running window instead of opening a second
+  one: *Play now* (default) or *Add to the playlist*. Selecting many files in
+  Explorer and pressing Enter adds them all and plays the first. `--new-instance`
+  opens a separate window anyway; `--play` / `--enqueue` force the mode.
+* **Mini player** (`Ctrl+Shift+M`, the button above the video, *View* menu): a
+  small frameless always-on-top window with play/pause, previous/next, mute,
+  the seek bar and the title. Drag it anywhere; it remembers its spot.
+  Double-click, `Esc` or the ⤢ button bring the full window back.
+* **Picture in picture** (`Ctrl+Shift+T`, the pin above the video): keeps the
+  normal window above other windows.
+* **Seek previews**: hovering the timeline of a local video shows a thumbnail of
+  that moment. Frames are made in the background (a separate libVLC instance)
+  and cached next to the library thumbnails, so a file is decoded once.
+* **Windows integration**: the keyboard's media keys and the Windows media
+  overlay (volume flyout / lock screen: title, play/pause, next/previous);
+  previous / play-pause / next buttons under the taskbar thumbnail and playback
+  progress on the taskbar icon; the screen does not sleep while a *video*
+  plays (it may for music or when paused). Each can be turned off in
+  Settings → System.
+* **Window placement**: size, position, monitor, maximized and fullscreen are
+  restored on the next launch. If that monitor is gone, its arrangement
+  changed or its scaling changed, the window is moved onto a monitor that
+  exists and shrunk to fit.
+* **Welcome screen** on the first launch: theme and accent, file types (Windows)
+  and library folders (`Videos` / `Music` are suggested). *Skip* changes nothing.
+* **Updates**: once a day at most, on launch, VLClone asks GitHub Releases for a
+  newer version and shows a toast with *Download*; it never installs anything.
+  Off in Settings → System; *Check for updates* in About.
+* **If VLClone crashes**, the next launch says so and offers *Open log folder*
+  (crash report with the native fault trace and the end of the log). Logs
+  rotate in `%LOCALAPPDATA%\VLClone\logs` (`~/.local/share/vlclone/logs`).
 
 ![Quick settings](docs/quick-settings.png)
 
@@ -235,6 +293,15 @@ manager is needed for the translucent controls (every modern desktop has one).
   <img src="docs/stream.png" alt="Stream dialog" width="400">
   <img src="docs/capture-screen.png" alt="Screen capture" width="420">
 </p>
+
+![Light theme with a blue accent](docs/theme-light.png)
+
+<p>
+  <img src="docs/mini-player.png" alt="Mini player" width="320">
+  <img src="docs/welcome.png" alt="Welcome screen" width="420">
+</p>
+
+![Settings: Appearance](docs/settings.png)
 
 ### Convert formats
 
@@ -299,6 +366,8 @@ build's self-test). Things the probing turned up:
 | Next / previous title, disc menu | `Shift+B` / `Shift+O`, `Shift+M` |
 | Disc menu navigation | `↑` `↓` `←` `→` `Enter` (only while a menu is shown) |
 | Media library | `Ctrl+Shift+L` |
+| Mini player / always on top (picture in picture) | `Ctrl+Shift+M` / `Ctrl+Shift+T` |
+| Media keys (play/pause, stop, next, previous) | the keyboard's media keys, also through the Windows media overlay |
 | Convert / save, stream | `Ctrl+R`, `Ctrl+S` |
 | Record / stop recording | `Shift+R` |
 | Media information | `Ctrl+I` (or `Ctrl+J`) |
@@ -330,9 +399,22 @@ vlclone/
     recorder.py      Record button (segment remux / live copy)
     streamer.py      HTTP streaming of the current media
     session.py       playlist persistence between sessions
+    settings.py      settings, sections, versioned migration of older files
+    instance.py      single-instance message format and Explorer batching
+    windowstate.py   window restore plan (monitors, scaling), mini-player spot
+    desktop.py       what the OS sees: keep-awake rule, taskbar state, media-key de-dup
+    seek_preview.py  seek-bar thumbnails on a worker thread
+    updates.py       version comparison, once-a-day GitHub Releases check
+    diagnostics.py   rotating logs, crash markers and reports
+    associations.py  file types + Explorer verbs as data (installer and app)
     playlist.py      ordering, current item, repeat, shuffle
     abloop.py, stepping.py, timefmt.py, media_sources.py
-    m3u.py, resume.py, settings.py, shortcuts.py, paths.py
+    m3u.py, resume.py, shortcuts.py, paths.py
+  integration/     # OS calls only, each optional (no-op elsewhere)
+    win_taskbar.py   ITaskbarList3 via ctypes COM: thumbnail buttons, progress
+    win_media.py     media overlay (SMTC) + media keys via pywinrt
+    win_assoc.py     per-user file types (portable zip)
+    power.py         keep-awake (SetThreadExecutionState / freedesktop inhibit)
   ui/              # PySide6 widgets, talk only to PlayerController
     main_window.py   window, sidebar, menus, wiring
     overlay.py       translucent always-on-top controls window over the video
@@ -342,7 +424,11 @@ vlclone/
     convert_dialog.py Convert / save dialog and the Conversions panel
     stream_dialog.py Stream dialog
     library_view.py  media library view, folder manager
-    playlist_panel.py, widgets.py, icons.py (vector, high-DPI), theme.py …
+    theme.py         palettes, accent maths, style sheets, live switching
+    instance.py      QLockFile + QLocalServer transport for single instance
+    desktop.py       feeds the integrations from the window timer
+    welcome.py       welcome screen, crash notice, theme picker, file types box
+    playlist_panel.py, widgets.py, icons.py (vector, high-DPI) …
 ```
 
 * **libVLC renders into a native child window**, which Qt can't paint over, so
@@ -405,6 +491,33 @@ vlclone/
 * **Recording** has no public libVLC 3 call (VLC uses an internal input
   variable), so it reuses the convert pipeline: segment remux for seekable
   media, a parallel copy for live streams.
+* **Single instance**: the first process takes `instance.lock` (`QLockFile`) in
+  the config folder and listens on a per-user local socket (a named pipe on
+  Windows); later processes send their command line as one JSON line and exit.
+  A lock left by a crash is stale once its process is gone and is taken over
+  (with the leftover socket file); if the owner is alive but hung, the new
+  process opens the files itself after a few seconds instead of exiting. The
+  window batches messages that arrive within 0.5 s (Explorer starts one
+  process per selected file).
+* **Mini player and picture in picture** are the main window with other window
+  flags (frameless + always on top) and a compact overlay, so libVLC keeps
+  drawing into the same native window. Should a platform recreate that window
+  on a flag change, the new handle is given to libVLC and the media reloads at
+  the same position.
+* **Themes** rewrite the tokens in `ui/theme.py` and re-apply one style sheet;
+  painted widgets read the tokens at paint time and icons can name a token
+  (`"@ACCENT"`), so nothing has to be rebuilt. The overlay has its own
+  always-dark style sheet.
+* **Taskbar and media overlay**: Qt 6 has no taskbar API any more, so
+  `integration/win_taskbar.py` calls `ITaskbarList3` through ctypes (buttons are
+  added when Explorer sends *TaskbarButtonCreated*; clicks arrive as
+  `WM_COMMAND` in `MainWindow.nativeEvent`). The media overlay borrows the
+  SMTC of a `Windows.Media.Playback.MediaPlayer` (via pywinrt) whose own
+  command handling is off. Both only translate `core/desktop.py`'s decisions.
+* **Settings files are versioned** (`settings_version`). `migrate()` upgrades
+  files from older versions step by step: a phase 1-4 file is version 1, skips
+  the welcome screen, and keeps a user's custom shortcut when a new default
+  (Ctrl+Shift+M, Ctrl+Shift+T…) would collide with it.
 
 ### Adding the later VLC features
 
@@ -430,12 +543,13 @@ The structure is meant to absorb VLC's bigger features without rewrites:
 | Media library | ✅ phase 3 (`library.py`, `library_scanner.py`, `library_view.py`) |
 | Convert / stream out / record | ✅ phase 4 (`transcode.py`, `converter.py`, `recorder.py`, `streamer.py`) |
 | Playlists/podcasts/UPnP discovery | a backend `media_discoverer` wrapper + a library section |
+| Daily-driver polish, Windows integration | ✅ phase 5 (see the table below) |
 
 ## Status
 
 All eight core-player priorities (phase 1), the effects work (phase 2), media
-sources + library (phase 3) and convert/record/stream (phase 4) are
-implemented:
+sources + library (phase 3), convert/record/stream (phase 4) and the
+daily-driver polish (phase 5) are implemented:
 
 | # | Feature | State |
 | --- | --- | --- |
@@ -464,6 +578,17 @@ implemented:
 | P4 | Queue: progress, ETA, cancel, show in folder, retry; no partial files left | ✅ |
 | P4 | Record (Shift+R) with REC indicator; screen and camera recording | ✅ (screen recording tested on X11; needs a Windows check) |
 | P4 | HTTP streaming (copy or H.264 + AAC, port, URL) | ✅ (fetched locally in tests and in the Windows self-test) |
+| P5 | Single instance: Explorer / second launch hand files to the running window, play now or enqueue, stale lock after a crash | ✅ (tested across real processes; Windows self-test hands off to a second exe) |
+| P5 | Installer: opt-in file types, Play with / Add to playlist in Explorer, clean uninstall; per-user registration for the zip | ✅ (needs a manual check on Windows) |
+| P5 | Media keys, Windows media overlay (SMTC), taskbar buttons + progress | ✅ (needs a manual check on Windows; the self-test creates both) |
+| P5 | Keep the screen on while a video plays (not audio, not paused) | ✅ |
+| P5 | Dark / light / follow-system themes, accent colour | ✅ (screenshot check of every theme on a virtual display) |
+| P5 | Mini player, picture in picture | ✅ |
+| P5 | Seek-bar thumbnails (background, cached with the library's) | ✅ |
+| P5 | Window size/position/monitor/fullscreen restored (multi-monitor, scaling) | ✅ (restore plan unit-tested; needs a real multi-monitor check) |
+| P5 | Settings in sections with search and per-section reset; versioned settings with migration | ✅ |
+| P5 | Welcome screen, crash report + Open log folder, rotating logs | ✅ |
+| P5 | Update check (GitHub Releases, once a day, notify only); version from one place; tag → release with notes | ✅ |
 
 Known limitations / not yet done:
 
@@ -474,8 +599,25 @@ Known limitations / not yet done:
 * Turning image adjust on or off (moving away from / back to all-neutral
   values) rebuilds libVLC's video filter chain once, which can show a single
   dropped frame; moving sliders after that is smooth.
-* Seek preview shows the time under the cursor, not a thumbnail.
-* No single-instance mode / "open with" handoff to an existing window yet.
+* Seek thumbnails are for local files only (not streams or discs); the first
+  hover over a not-yet-made spot shows the nearest ready frame or just the
+  time, the exact frame appears a moment later. Making them decodes the file a
+  second time in the background (about 0.1-0.5 s per frame).
+* Windows decides the default player: the installer and Settings register
+  VLClone properly, but for types another program already owns you confirm the
+  switch in Settings → Default apps. Registering file types from Settings only
+  works in the packaged `VLClone.exe` (from source there is no exe to point at).
+* The media overlay needs the `winrt-*` packages (bundled in the Windows build);
+  without them media keys still work while VLClone has focus. Cover art is not
+  sent to the overlay.
+* The taskbar flyout's icons follow Windows' *system* theme at launch; switching
+  the taskbar between light and dark while VLClone runs keeps the old icon
+  colour until the next start.
+* Keep-awake on Linux uses the freedesktop ScreenSaver D-Bus interface (GNOME,
+  KDE, Xfce…); other desktops are not covered. Taskbar and media overlay are
+  Windows-only.
+* The update check only notifies; it reads `api.github.com` (unauthenticated,
+  60 requests/hour per IP, far above once a day).
 * Development and screenshots were done on Linux (X11 + compositor, real
   libVLC 3.0.20). The Windows path (HWND embedding, `libvlc.dll` discovery)
   follows libVLC's documented API but should be smoke-tested on a Windows box.
@@ -536,6 +678,33 @@ generated MKV and jumps between them, plays a local HTTP stream, checks that a
 drives, runs an MP4 and an MP3 conversion through the queue, probes every
 convert preset (the build shows the working/disabled lists as notices) and
 fetches an HTTP stream.
+
+Phase 5 adds: `tests/test_phase5_core.py` (settings migration, update-version
+comparison and the once-a-day rule, handoff protocol and batching, the window
+restore plan for unplugged / rearranged / rescaled monitors, keep-awake and
+taskbar rules, crash reports, log rotation, file-type entries, release notes),
+`tests/test_instance.py` (handoff between real processes, a crashed owner's
+stale lock, a hung owner), `tests/test_ui_theme.py` (switching dark / light /
+system and accent with windows open), `tests/test_ui_phase5.py` (mini player,
+picture in picture, handoff into the playlist, window state, seek previews,
+settings search and reset, welcome screen, update toast) and
+`tests/test_vlc_phase5.py` (real-libVLC thumbnails are RGB frames at the
+requested time; this caught library thumbnails being grey luma since phase 3).
+
+`tests/test_screenshots.py` renders every theme (dark, light, follow-system,
+custom accents) and the mini player, composites the overlay over the video and
+checks backgrounds, popovers, the accent and the dark video stage pixel by
+pixel. The workflow's *ui-screenshots* job runs it on a virtual X display and
+keeps the PNGs for 3 days:
+
+```bash
+xvfb-run -a env QT_QPA_PLATFORM=xcb VLCLONE_SCREENSHOT_DIR=shots python -m pytest tests/test_screenshots.py
+```
+
+The Windows self-test also starts the packaged exe a second time with
+`--enqueue` and checks that the first instance received the file, checks the
+update logic against a local mock of the GitHub API, and creates the media
+overlay, the taskbar COM object and a keep-awake request.
 
 `tests/test_vlc_phase4.py` converts a clip with every preset the local libVLC
 supports and checks the codecs with VLC and `ffprobe`, checks exact trims and

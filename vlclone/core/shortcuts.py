@@ -22,7 +22,8 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "load_subtitle": ("Load subtitle file", []),
     "quit": ("Quit", ["Ctrl+Q"]),
     # Playback
-    "play_pause": ("Play / pause", ["Space", "Media Play"]),
+    # The hardware play/pause key arrives as "Toggle Media Play/Pause" on Windows.
+    "play_pause": ("Play / pause", ["Space", "Media Play", "Toggle Media Play/Pause", "Media Pause"]),
     "stop": ("Stop", ["S", "Media Stop"]),
     "next": ("Next", ["N", "Media Next"]),
     "previous": ("Previous", ["P", "Media Previous"]),
@@ -86,6 +87,8 @@ DEFAULT_SHORTCUTS: dict[str, tuple[str, list[str]]] = {
     "settings": ("Settings", ["Ctrl+P"]),
     "show_time": ("Show position", ["T"]),
     "save_playlist": ("Save playlist", ["Ctrl+Y"]),
+    "mini_player": ("Mini player", ["Ctrl+Shift+M"]),
+    "always_on_top": ("Always on top (picture-in-picture)", ["Ctrl+Shift+T"]),
 }
 
 

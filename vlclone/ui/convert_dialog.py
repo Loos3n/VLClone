@@ -25,6 +25,7 @@ from ..core.settings import Settings
 from ..core.timefmt import format_ms, parse_time
 from ..core.transcode import (AUDIO_BITRATES, CONVERT_PRESETS, PRESETS, RESOLUTIONS, VIDEO_QUALITY,
                               ConvertSettings, output_path, validate)
+from . import theme
 from .dialogs import BaseDialog
 from .icons import icon
 from .quick_settings import chip, section
@@ -168,7 +169,7 @@ class ConvertDialog(BaseDialog):
         self.body.addWidget(self.options)
 
         self.error = QLabel()
-        self.error.setStyleSheet("color: #ff5d5d;")
+        self.error.setObjectName("Error")
         self.error.setWordWrap(True)
         self.body.addWidget(self.error)
         box = QDialogButtonBox()
@@ -443,8 +444,7 @@ class JobRow(QFrame):
         self.bar.setRange(0, 0 if job.live and job.state is JobState.RUNNING else 1000)
         self.bar.setValue(int(job.progress * 1000))
         self.status.setText(job_status(job))
-        self.status.setStyleSheet("color: #ff5d5d;" if job.state is JobState.FAILED
-                                  else ("color: #ff5d5d;" if job.live and job.state is JobState.RUNNING else ""))
+        theme.set_error(self.status, job.state is JobState.FAILED or (job.live and job.state is JobState.RUNNING))
         running = job.state is JobState.RUNNING
         self.buttons["stop"].setVisible(job.live and running)
         self.buttons["cancel"].setVisible(not job.finished)

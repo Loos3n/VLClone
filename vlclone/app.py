@@ -12,6 +12,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("inputs", nargs="*", help="files, folders, playlists or URLs to play")
     parser.add_argument("--fake-backend", action="store_true",
                         help="run the UI without libVLC (for UI development)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--play", action="store_true", help="play the inputs now (Explorer: Play with VLClone)")
+    mode.add_argument("--enqueue", action="store_true",
+                      help="add the inputs to the playlist (Explorer: Add to VLClone playlist)")
+    parser.add_argument("--new-instance", action="store_true",
+                        help="open a separate window even in single-instance mode")
     parser.add_argument("--self-test", metavar="REPORT",
                         help="load libVLC, write its version to REPORT and exit (used by the build)")
     return parser.parse_args(argv)
@@ -59,6 +65,7 @@ def self_test(report: str) -> int:
             backend.set_engine_filters(EngineFilters())
             lines.extend(_self_test_phase3(backend, tmp, tone))
             lines.extend(_self_test_phase4(tmp))
+            lines.extend(_self_test_phase5(tmp))
         backend.release()
     except Exception as exc:  # report anything: this runs without a console
         lines.append(f"fail {type(exc).__name__}: {exc}")
@@ -278,6 +285,131 @@ def _self_test_phase4(tmp: str) -> list[str]:
     return lines
 
 
+def _self_test_phase5(tmp: str) -> list[str]:
+    """Single-instance handoff to a second real process, a mocked update check, and the
+    Windows integration pieces (media overlay, taskbar COM, keep-awake, file types)."""
+    import http.server
+    import json
+    import subprocess
+    import threading
+    import time
+    from pathlib import Path
+
+    lines: list[str] = []
+
+    def step(name, fn) -> None:
+        try:
+            lines.append(f"{name}: {fn()}")
+        except Exception as exc:  # one failing check must not hide the others
+            lines.append(f"{name}: fail {type(exc).__name__}: {exc}")
+
+    def handoff() -> str:
+        from PySide6.QtCore import QCoreApplication
+
+        from .core.instance import server_name
+        from .ui.instance import InstanceGuard
+
+        app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        cfg = Path(tmp) / "instance-config"
+        cfg.mkdir(exist_ok=True)
+        guard = InstanceGuard(server_name(str(cfg)), cfg / "instance.lock")
+        if not guard.acquire() or not guard.primary:
+            return "fail (could not become the first instance)"
+        got = []
+        guard.received.connect(got.append)
+        media = str(Path(tmp) / "handoff clip.mkv")
+        cmd = [sys.executable] + ([] if getattr(sys, "frozen", False) else ["-m", "vlclone"])
+        env = {**os.environ, "VLCLONE_CONFIG_DIR": str(cfg)}
+        child = subprocess.Popen(cmd + ["--enqueue", media], env=env)
+        end = time.monotonic() + 30
+        while not got and time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.02)
+        try:
+            code = child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            code = "hung"
+        guard.close()
+        if not got:
+            return f"fail (nothing received; second process exit {code})"
+        msg = got[0]
+        ok = msg.inputs == [media] and msg.mode == "enqueue" and code == 0
+        return f"{'ok' if ok else 'fail'} ({len(msg.inputs)} input, mode {msg.mode}, second process exit {code})"
+
+    def update_check() -> str:
+        from .core.updates import check_for_update
+
+        body = json.dumps({"tag_name": "v99.0.0", "html_url": "https://example.invalid/r", "draft": False,
+                           "prerelease": False}).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/repos/x/releases/latest"
+            newer = check_for_update("1.0.0", url=url)
+            same = check_for_update("99.0.0", url=url)
+        finally:
+            server.shutdown()
+        if newer.release and newer.release.version == "99.0.0" and same.checked and same.release is None:
+            return "ok (99.0.0 offered, not offered when current)"
+        return f"fail ({newer.error or newer.release} / {same.error or same.release})"
+
+    def media_overlay() -> str:
+        if sys.platform != "win32":
+            return "skipped (not Windows)"
+        from .core.desktop import SessionState
+        from .integration.win_media import create_media_overlay
+
+        overlay = create_media_overlay()
+        if overlay is None:
+            return "unavailable (see log)"
+        overlay.update(SessionState("playing", "Self-test", "VLClone", True, 1000, 60000, True, True))
+        overlay.update(SessionState("paused", "Self-test", "VLClone", True, 1000, 60000, True, True))
+        overlay.close()
+        return "ok"
+
+    def taskbar() -> str:
+        if sys.platform != "win32":
+            return "skipped (not Windows)"
+        from .integration.win_taskbar import create_taskbar_list
+
+        create_taskbar_list()
+        return "ok (ITaskbarList3 created)"
+
+    def keep_awake() -> str:
+        from .integration.power import SleepInhibitor
+
+        inhibitor = SleepInhibitor()
+        on = inhibitor.set_inhibited(True)
+        off = inhibitor.set_inhibited(False)
+        return f"request {on}, release {off}"
+
+    def file_types() -> str:
+        from .core.associations import all_extensions, association_entries, context_menu_entries
+
+        n = len(association_entries(["video", "audio", "playlist"], "x")) + len(context_menu_entries("x"))
+        return f"{len(all_extensions())} extensions, {n} registry values"
+
+    step("single instance handoff", handoff)
+    step("update check (mocked)", update_check)
+    step("media overlay", media_overlay)
+    step("taskbar", taskbar)
+    step("keep awake", keep_awake)
+    step("file types", file_types)
+    return lines
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.self_test:
@@ -288,26 +420,64 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QGuiApplication
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
 
     from . import APP_NAME, __version__
-    from .core.controller import PlayerController
-    from .core.effects import EffectsStore, EqPresetStore
-    from .core.resume import ResumeStore
-    from .core.fake_backend import FakeTranscoder
-    from .core.session import clear_saved_playlist, restore_playlist, save_playlist
+    from .core.diagnostics import CrashGuard, log, setup_logging
     from .core.settings import Settings
-    from .ui.main_window import MainWindow
-    from .ui.theme import apply_theme
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName(APP_NAME)
-    apply_theme(app)
-
     settings = Settings.load()
+    mode = "play" if args.play else ("enqueue" if args.enqueue else None)
+
+    # Single instance: before anything slow, so a second launch hands over and exits at once.
+    guard = None
+    if settings.single_instance and not args.new_instance:
+        from .core.instance import HandoffMessage, server_name
+        from .core.paths import config_dir
+        from .ui.instance import InstanceGuard
+
+        guard = InstanceGuard(server_name(str(config_dir())), config_dir() / "instance.lock")
+        if not guard.acquire():
+            if guard.send(HandoffMessage(list(args.inputs), mode, os.getcwd())):
+                return 0
+            guard = None  # the running instance is hung: run on our own rather than lose the files
+
+    setup_logging()
+    log.info("%s %s starting (Python %s, %s)", APP_NAME, __version__, sys.version.split()[0], sys.platform)
+    crash = CrashGuard()
+    crashes = crash.collect_crashes()
+    crash.start()
+    try:
+        code = run_app(app, args, settings, guard, crashes, mode)
+    except BaseException as exc:
+        crash.fatal(exc)  # the next launch reports it
+        raise
+    crash.stop()
+    if guard is not None:
+        guard.close()
+    log.info("clean exit (%s)", code)
+    return code
+
+
+def run_app(app, args, settings, guard, crashes, mode) -> int:
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+
+    from . import APP_NAME
+    from .core.controller import PlayerController
+    from .core.effects import EffectsStore, EqPresetStore
+    from .core.fake_backend import FakeTranscoder
+    from .core.resume import ResumeStore
+    from .core.session import clear_saved_playlist, restore_playlist, save_playlist
+    from .ui.main_window import MainWindow
+    from .ui.theme import apply_theme
+
+    apply_theme(app, settings.theme, settings.accent_color)
     if args.fake_backend:
         from .core.fake_backend import FakeBackend
 
@@ -328,11 +498,21 @@ def main(argv: list[str] | None = None) -> int:
     library = make_library(settings, fake=args.fake_backend)
     transcoder = make_transcoder_factory(fake=args.fake_backend)
     window = MainWindow(controller, settings, library, transcoder,
-                        (lambda: FakeTranscoder(instant=True)) if args.fake_backend else None)
+                        (lambda: FakeTranscoder(instant=True)) if args.fake_backend else None,
+                        preview_probe_factory=library.probe_factory)
     window.presets.start()  # background: which presets this libVLC can write (cached per version)
+    if guard is not None:
+        guard.received.connect(window.handoff_received)
+    window.restore_window_state()
     window.show()
+    window.after_show()
     if args.inputs:
-        controller.open(args.inputs)
+        controller.open(args.inputs, play=False if mode == "enqueue" else None)
+    if crashes:
+        QTimer.singleShot(700, lambda: window.show_crash_notice(crashes))
+    elif not settings.first_run_done:
+        QTimer.singleShot(400, window.show_welcome)
+    window.schedule_update_check()
 
     code = app.exec()
     try:
@@ -344,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     controller.shutdown()
     library.shutdown()
+    window.shutdown_services()
     try:
         settings.save()
     except OSError:

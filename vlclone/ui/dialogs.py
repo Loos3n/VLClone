@@ -30,6 +30,7 @@ class BaseDialog(QDialog):
         box.rejected.connect(self.reject)
         cancel.setCursor(Qt.PointingHandCursor)
         ok.setCursor(Qt.PointingHandCursor)
+        self.ok_button, self.cancel_button = ok, cancel
         self.body.addSpacing(4)
         self.body.addWidget(box)
         return box
@@ -50,7 +51,7 @@ class JumpToTimeDialog(BaseDialog):
             row.addWidget(total)
         self.body.addLayout(row)
         self.error = QLabel("")
-        self.error.setStyleSheet("color: #ff5d5d;")
+        self.error.setObjectName("Error")
         self.body.addWidget(self.error)
         self.add_buttons("Go")
 

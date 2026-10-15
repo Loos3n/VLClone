@@ -748,6 +748,11 @@ class VlcBackend(MediaBackend):
         return _decode(self.vlc.libvlc_get_version())
 
 
+_FORMAT_CB_PTR = ctypes.CFUNCTYPE(ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+                                  ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint))
+
+
 class VlcMediaProbe:
     """Media-library metadata and thumbnails through libVLC (a ``MetadataProbe``).
 
@@ -770,6 +775,7 @@ class VlcMediaProbe:
         self.instance = self.vlc.Instance(base + list(args or []))
         if self.instance is None:
             raise LibVlcNotFound("libVLC failed to initialise for the media library")
+        self._info_cache: dict = {}
 
     def close(self) -> None:
         try:
@@ -813,21 +819,29 @@ class VlcMediaProbe:
         finally:
             media.release()
 
-    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1) -> bool:
+    def thumbnail(self, path: str, out_path: str, width: int = 320, duration_ms: int = -1,
+                  at_ms: int | None = None) -> bool:
         from .png import bgra_to_rgb, write_png
 
         vlc = self.vlc
-        try:
-            info = self.probe(path)
-        except Exception:
-            info = None
+        info = self._info_cache.get(path) if at_ms is not None else None
+        if info is None:
+            try:
+                info = self.probe(path)
+            except Exception:
+                info = None
+            if at_ms is not None:  # seek previews ask for many frames of one file
+                self._info_cache = {path: info}
         aspect = info.width / info.height if info and info.width and info.height else None
         lock = threading.Lock()
         # Filled by the format callback: the decoder tells us the picture size and
         # we ask libVLC to scale it to our width in RV32 (B, G, R, X).
         state: dict = {"frames": 0, "data": None, "buf": None, "size": None}
 
-        @vlc.CallbackDecorators.VideoFormatCb
+        # python-vlc declares ``chroma`` as c_char_p, which hands the callback a *copy*: writing
+        # "RV32" into it would never reach libVLC (frames would stay planar I420 and come out as
+        # garbled grey). So the callback is declared with a real pointer and cast to python-vlc's type.
+        @_FORMAT_CB_PTR
         def on_format(opaque, chroma, w_ptr, h_ptr, pitches, lines):
             src_w, src_h = w_ptr[0], h_ptr[0]
             if not src_w or not src_h:
@@ -865,13 +879,18 @@ class VlcMediaProbe:
 
         player = self.instance.media_player_new()
         player.video_set_callbacks(on_lock, on_unlock, on_display, None)
-        player.video_set_format_callbacks(on_format, on_cleanup)
+        player.video_set_format_callbacks(ctypes.cast(on_format, vlc.CallbackDecorators.VideoFormatCb),
+                                          on_cleanup)
         media = self.instance.media_new_path(path)
         duration_ms = duration_ms if duration_ms and duration_ms > 0 else (info.duration_ms if info else -1)
-        if duration_ms and duration_ms > 0:
+        if at_ms is not None:
+            media.add_option(f":start-time={max(0, at_ms) / 1000:.2f}")
+        elif duration_ms and duration_ms > 0:
             # A third in, capped so long films don't need a far seek; skips black intros.
             media.add_option(f":start-time={min(duration_ms * 0.33, 300_000) / 1000:.2f}")
-        for opt in (":no-audio", ":no-spu", ":input-fast-seek"):
+        # Seek previews must show the real frame at that time, so they seek precisely (decode from
+        # the keyframe before); the library thumbnail only needs some frame and seeks fast.
+        for opt in (":no-audio", ":no-spu") + (() if at_ms is not None else (":input-fast-seek",)):
             media.add_option(opt)
         player.set_media(media)
         try:
