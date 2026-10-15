@@ -12,11 +12,31 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("inputs", nargs="*", help="files, folders, playlists or URLs to play")
     parser.add_argument("--fake-backend", action="store_true",
                         help="run the UI without libVLC (for UI development)")
+    parser.add_argument("--self-test", metavar="REPORT",
+                        help="load libVLC, write its version to REPORT and exit (used by the build)")
     return parser.parse_args(argv)
+
+
+def self_test(report: str) -> int:
+    """Headless check that the packaged app can load libVLC and its plugins."""
+    try:
+        from .core.vlc_backend import VlcBackend
+
+        backend = VlcBackend(["--quiet", "--vout=dummy", "--aout=dummy"])
+        version = backend.engine_version()
+        backend.release()
+        text, code = f"ok libVLC {version}\n", 0
+    except Exception as exc:  # report anything: this runs without a console
+        text, code = f"fail {type(exc).__name__}: {exc}\n", 1
+    with open(report, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.self_test:
+        return self_test(args.self_test)
     if sys.platform.startswith("linux") and not args.fake_backend:
         # libVLC embeds into X11 windows; under Wayland use XWayland.
         os.environ.setdefault("QT_QPA_PLATFORM", "xcb")

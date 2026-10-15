@@ -17,9 +17,35 @@ class LibVlcNotFound(RuntimeError):
     pass
 
 
+def bundled_vlc_dir() -> str | None:
+    """Folder of a libVLC shipped next to the app (the packaged Windows build)."""
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)))
+        roots.append(os.path.dirname(sys.executable))
+    for root in roots:
+        folder = os.path.join(root, "vlc")
+        if os.path.isfile(os.path.join(folder, "libvlc.dll")):
+            return folder
+    return None
+
+
+def _use_vlc_folder(folder: str) -> None:
+    os.environ["PYTHON_VLC_LIB_PATH"] = os.path.join(folder, "libvlc.dll")
+    plugins = os.path.join(folder, "plugins")
+    os.environ["PYTHON_VLC_MODULE_PATH"] = plugins
+    os.environ["VLC_PLUGIN_PATH"] = plugins
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(folder)
+
+
 def _prepare_windows_search() -> None:
-    """Help python-vlc find a 64-bit VLC install on Windows."""
+    """Help python-vlc find libVLC on Windows: bundled copy first, then a 64-bit VLC install."""
     if sys.platform != "win32" or os.environ.get("PYTHON_VLC_LIB_PATH"):
+        return
+    bundled = bundled_vlc_dir()
+    if bundled:
+        _use_vlc_folder(bundled)
         return
     candidates: list[str] = []
     try:
@@ -37,12 +63,8 @@ def _prepare_windows_search() -> None:
     program_files = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles", r"C:\Program Files")
     candidates.append(os.path.join(program_files, "VideoLAN", "VLC"))
     for folder in candidates:
-        dll = os.path.join(folder, "libvlc.dll")
-        if os.path.isfile(dll):
-            os.environ["PYTHON_VLC_LIB_PATH"] = dll
-            os.environ.setdefault("PYTHON_VLC_MODULE_PATH", os.path.join(folder, "plugins"))
-            if hasattr(os, "add_dll_directory"):
-                os.add_dll_directory(folder)
+        if os.path.isfile(os.path.join(folder, "libvlc.dll")):
+            _use_vlc_folder(folder)
             return
 
 

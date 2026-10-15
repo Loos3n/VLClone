@@ -1,0 +1,92 @@
+name: Windows build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+    inputs:
+      vlc_version:
+        description: "VLC version to bundle"
+        default: "3.0.21"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VLC_VERSION: ${{ github.event.inputs.vlc_version || '3.0.21' }}
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt pyinstaller pillow
+
+      - name: Unit tests
+        run: python -m pytest -q --ignore=tests/test_vlc_backend.py
+
+      - name: Cache VLC download
+        uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: vlc-${{ env.VLC_VERSION }}-win64
+
+      - name: Fetch and stage libVLC
+        run: python packaging/fetch_vlc.py --version $env:VLC_VERSION --out build/vlc
+
+      - name: Build plugin cache
+        run: build\vlc\vlc-cache-gen.exe build\vlc\plugins
+
+      - name: Icon and version resource
+        id: meta
+        run: |
+          python packaging/make_icon.py build/vlclone.ico
+          python packaging/make_version_info.py
+          "version=$(python packaging/make_version_info.py --print)" >> $env:GITHUB_OUTPUT
+
+      - name: PyInstaller
+        run: pyinstaller packaging/vlclone.spec --noconfirm --distpath dist --workpath build/pyinstaller
+
+      - name: Self-test the packaged exe
+        run: |
+          $p = Start-Process -FilePath dist\VLClone\VLClone.exe -ArgumentList "--self-test", "$PWD\selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Installer
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=${{ steps.meta.outputs.version }}" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Portable zip
+        run: Compress-Archive -Path dist\VLClone -DestinationPath "dist\VLClone-${{ steps.meta.outputs.version }}-win64-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VLClone-${{ steps.meta.outputs.version }}-windows
+          path: |
+            dist/VLClone-*-Setup.exe
+            dist/VLClone-*-portable.zip
+          if-no-files-found: error
+
+      - name: GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/VLClone-*-Setup.exe
+            dist/VLClone-*-portable.zip

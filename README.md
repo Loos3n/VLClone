@@ -11,7 +11,39 @@ fills the window and the controls fade away while you watch.
 > VLClone is an independent frontend. It does not fork, modify or reverse
 > engineer VLC; it uses the public libVLC API of an installed VLC.
 
-## Install on Windows
+## Windows download (no Python needed)
+
+Every push builds Windows packages with GitHub Actions
+(`.github/workflows/windows-build.yml`). Open the repository's **Actions** tab →
+*Windows build* → the latest run → **Artifacts**, and download
+`VLClone-<version>-windows`. It contains:
+
+* `VLClone-<version>-Setup.exe`: installer (Start menu entry, optional desktop
+  icon, "Open with" registration, uninstaller).
+* `VLClone-<version>-win64-portable.zip`: unzip anywhere and run `VLClone.exe`.
+
+Both **bundle libVLC** (from the official VLC 3.0.21 win64 build, verified by
+SHA-256), so VLC does not need to be installed. Pushing a tag like `v0.1.0`
+also attaches both files to a GitHub release. The exe is unsigned, so Windows
+SmartScreen may ask you to confirm the first launch (*More info → Run anyway*).
+
+To build locally on Windows:
+
+```powershell
+pip install -r requirements.txt pyinstaller pillow
+python packaging\fetch_vlc.py
+build\vlc\vlc-cache-gen.exe build\vlc\plugins
+python packaging\make_icon.py
+python packaging\make_version_info.py
+pyinstaller packaging\vlclone.spec --noconfirm     # -> dist\VLClone\VLClone.exe
+iscc /DAppVersion=0.1.0 packaging\installer.iss     # optional installer (Inno Setup 6)
+```
+
+Licensing note: the packages redistribute libVLC and VLC plugins, which are
+licensed under the LGPL/GPL by VideoLAN; VLC's license is included as
+`VLC-LICENSE.txt` and VLC's source is available from <https://www.videolan.org/>.
+
+## Install from source on Windows
 
 1. **Install VLC (64-bit)** from <https://www.videolan.org/vlc/>.
    On the download page pick *Windows 64-bit* (the default "Download VLC"
