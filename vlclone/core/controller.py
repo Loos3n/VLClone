@@ -12,26 +12,24 @@ import time as _time
 from pathlib import Path
 
 from .abloop import ABLoop, ABState
-from .backend import MediaBackend, PlaybackState, Track, VideoOptions
-from .effects import (ADJUST_RANGES, EQ_BANDS, NORMALIZE_MAX, NORMALIZE_MIN, SHARPEN_MAX, SHARPEN_MIN,
-                      STEREO_MODE_VALUES, STEREO_MODES, AudioEffects, Debouncer, Effects, EffectsStore,
-                      EngineFilters, EqPresetStore, VideoEffects, clamp_db, clean_bands, engine_filters)
+from .backend import NAVIGATE_ACTIONS, Chapter, MediaBackend, PlaybackState, TitleInfo, Track, VideoOptions
+from .effects import (ADJUST_RANGES, ASPECT_RATIOS, CROP_RATIOS, DEINTERLACE_MODES, EQ_BANDS, NORMALIZE_MAX,
+                      NORMALIZE_MIN, ROTATIONS, SHARPEN_MAX, SHARPEN_MIN, STEREO_MODE_VALUES, STEREO_MODES,
+                      ZOOM_LEVELS, AudioEffects, Debouncer, Effects, EffectsStore, EngineFilters, EqPresetStore,
+                      Geometry, VideoEffects, clamp_db, clean_bands, engine_filters)
 from .events import Signal
 from .m3u import read_m3u
 from .media_sources import expand_inputs, is_playlist_file, mrl_to_path, path_to_mrl
+from .network import DEFAULT_NETWORK_CACHING_MS, caching_option, describe_open_error, is_network_mrl
 from .playlist import Playlist, PlaylistItem, RepeatMode
 from .resume import ResumeStore
 from .settings import Settings
 from .stepping import MAX_VOLUME, clamp, cycle, fine_step_rate, step_rate, step_volume
 from .timefmt import format_delay, format_ms
 
-ASPECT_RATIOS: list[str | None] = [None, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"]
-CROP_RATIOS: list[str | None] = [None, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"]
-ZOOM_LEVELS: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0]
-ROTATIONS: list[int] = [0, 90, 180, 270]
-DEINTERLACE_MODES: list[str | None] = [
-    None, "blend", "bob", "discard", "linear", "mean", "x", "yadif", "yadif2x", "phosphor", "ivtc",
-]
+__all__ = ["ASPECT_RATIOS", "CROP_RATIOS", "DEINTERLACE_MODES", "ROTATIONS", "ZOOM_LEVELS", "PlayerController",
+           "zoom_label"]
+
 DELAY_STEP_MS = 50
 ACTIVE_STATES = (PlaybackState.PLAYING, PlaybackState.PAUSED, PlaybackState.BUFFERING, PlaybackState.OPENING)
 
@@ -42,6 +40,10 @@ def zoom_label(z: float) -> str:
 
 class PlayerController:
     RESUME_SAVE_INTERVAL_S = 10.0
+    #: How often chapters/titles are re-read while playing (discs change them on the fly).
+    CHAPTER_POLL_S = 1.0
+    #: Within this much of a chapter's start, "previous chapter" goes to the one before.
+    CHAPTER_RESTART_MS = 3000
     #: Quiet period before load-time filters (rotate, flip, sharpen) reload the media.
     RELOAD_DEBOUNCE_S = 0.6
 
@@ -64,6 +66,7 @@ class PlayerController:
         self.audio_delay = 0
         self.subtitle_delay = 0
         self.video = VideoOptions()
+        self._clock = clock
         self._last_subtitle_track: int | None = None
 
         self._state = PlaybackState.IDLE
@@ -86,6 +89,14 @@ class PlayerController:
         # Live effects the engine has been given a non-default value for. libVLC
         # keeps them on the player across media, so these must always be re-sent.
         self._live_touched: set[str] = set()
+        self._load_geometry(emit=False)
+
+        # Phase 3: chapters/titles, opening watchdog, playlist URLs.
+        self.chapters: list[Chapter] = []
+        self.titles: list[TitleInfo] = []
+        self.current_title = -1
+        self._chapter_poll = 0.0
+        self._opening_since: float | None = None
 
         # Signals (UI subscribes)
         self.state_changed = Signal()      # (PlaybackState)
@@ -104,6 +115,8 @@ class PlayerController:
         self.error = Signal()              # (text)
         self.effects_changed = Signal()    # (Effects)
         self.reload_pending = Signal()     # (bool) load-time filters waiting to apply
+        self.chapters_changed = Signal()   # (chapters, titles, current title)
+        self.open_failed = Signal()        # (PlaylistItem, message) media could not be opened
 
     # =============================================================== state
     @property
@@ -125,9 +138,12 @@ class PlayerController:
         return self.backend.length()
 
     # ============================================================== opening
-    def open(self, inputs: list[str], play: bool | None = None, at: int | None = None) -> int:
+    def open(self, inputs: list[str], play: bool | None = None, at: int | None = None,
+             options: list[str] | None = None, title: str | None = None) -> int:
         """Add files / folders / URLs / playlists; optionally start the first.
 
+        ``options`` are libVLC media options for every added item (caching,
+        capture device, disc menus…); ``title`` names a single added item.
         Returns the number of items added.
         """
         play = self.settings.play_on_open if play is None else play
@@ -140,7 +156,9 @@ class PlayerController:
                 except OSError as exc:
                     self.error.emit(f"Could not read playlist: {exc}")
             else:
-                items.append(mrl)
+                items.append(PlaylistItem(mrl, options=list(options or [])))
+        if title and len(items) == 1 and isinstance(items[0], PlaylistItem):
+            items[0].title = title
         indexes = self.playlist.add(items, at=at)
         if indexes and play:
             self.play_index(indexes[0])
@@ -177,7 +195,10 @@ class PlayerController:
             self.reload_pending.emit(False)
         self._loaded_filters = self.current_engine_filters()
         self.backend.set_engine_filters(self._loaded_filters)
-        self.backend.load(item.mrl)
+        self.backend.load(item.mrl, self.media_options(item))
+        self._opening_since = self._clock()
+        if not reload:
+            self._set_chapters([], [], -1)
         if not reload:
             self.ab.clear()
             self.ab_changed.emit(self.ab.state, None, None)
@@ -197,6 +218,15 @@ class PlayerController:
         if not reload:
             self.media_changed.emit(item)
             self.delays_changed.emit(0, 0)
+
+    def media_options(self, item: PlaylistItem) -> list[str]:
+        """libVLC options for ``item``: its own plus the default network caching."""
+        options = list(item.options)
+        caching = self.settings.network_caching_ms
+        if (is_network_mrl(item.mrl) and caching != DEFAULT_NETWORK_CACHING_MS
+                and not any(o.startswith(":network-caching=") for o in options)):
+            options.append(caching_option(caching))
+        return options
 
     def play(self) -> None:
         st = self.backend.state()
@@ -438,7 +468,7 @@ class PlayerController:
     def set_aspect_ratio(self, ratio: str | None) -> None:
         self.video.aspect_ratio = ratio
         self.backend.set_aspect_ratio(ratio)
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         self.osd.emit(f"Aspect ratio: {ratio or 'Default'}")
 
     def cycle_aspect_ratio(self) -> None:
@@ -447,7 +477,7 @@ class PlayerController:
     def set_crop(self, geometry: str | None) -> None:
         self.video.crop = geometry
         self.backend.set_crop(geometry)
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         self.osd.emit(f"Crop: {geometry or 'None'}")
 
     def cycle_crop(self) -> None:
@@ -456,7 +486,7 @@ class PlayerController:
     def set_zoom(self, factor: float) -> None:
         self.video.zoom = float(factor)
         self.backend.set_zoom(self.video.zoom)
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         self.osd.emit(f"Zoom: {zoom_label(self.video.zoom)}")
 
     def cycle_zoom(self) -> None:
@@ -465,7 +495,7 @@ class PlayerController:
     def set_deinterlace(self, mode: str | None) -> None:
         self.video.deinterlace = mode
         self.backend.set_deinterlace(mode)
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         self.osd.emit(f"Deinterlace: {mode or 'Off'}")
 
     def cycle_deinterlace(self) -> None:
@@ -476,7 +506,7 @@ class PlayerController:
         if degrees == self.video.rotation:
             return
         self.video.rotation = degrees
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         self.osd.emit(f"Rotation: {degrees}°")
         # libVLC applies the transform filter at load time: reload in place.
         self._request_reload()
@@ -519,9 +549,28 @@ class PlayerController:
         rotation = self.video.rotation
         self.video = VideoOptions(rotation=rotation)
         self._apply_video_options()
-        self.video_changed.emit(self.video)
+        self._geometry_edited()
         if rotation:
             self.set_rotation(0)
+
+    # Geometry persists with the effects (same global / per-file scope).
+    def _geometry_edited(self) -> None:
+        v = self.video
+        self.effects.geometry = Geometry(v.aspect_ratio, v.crop, v.zoom, v.rotation, v.deinterlace)
+        self._store_effects()
+        self.video_changed.emit(self.video)
+
+    def _load_geometry(self, emit: bool = True, apply: bool = False) -> None:
+        """Take aspect/crop/zoom/rotation/deinterlace from the current effect set."""
+        g = self.effects.geometry
+        video = VideoOptions(g.aspect_ratio, g.crop, g.zoom, g.rotation, g.deinterlace)
+        if video == self.video:
+            return
+        self.video = video
+        if apply and self.has_media:
+            self._apply_video_options()
+        if emit:
+            self.video_changed.emit(self.video)
 
     def _apply_video_options(self) -> None:
         self.backend.set_aspect_ratio(self.video.aspect_ratio)
@@ -566,6 +615,7 @@ class PlayerController:
         if fx.to_dict() != self.effects.to_dict():
             self.effects = fx
             self.effects_changed.emit(self.effects)
+            self._load_geometry()
 
     def _store_effects(self) -> None:
         owner = self._effects_owner()
@@ -589,6 +639,7 @@ class PlayerController:
         self.effects = fx
         self._apply_live_effects()
         self.effects_changed.emit(self.effects)
+        self._load_geometry(apply=True)
         if self.reload_needed:
             self._request_reload()
 
@@ -789,9 +840,109 @@ class PlayerController:
 
     def reset_all_effects(self) -> None:
         """Every audio and video effect back to neutral (geometry like crop/zoom untouched)."""
-        self.effects = Effects()
+        self.effects = Effects(geometry=self.effects.geometry)
         self._apply_live_effects()
         self._effects_edited(reload=True, osd="All effects reset")
+
+    # ===================================================== chapters / titles
+    def _set_chapters(self, chapters: list[Chapter], titles: list[TitleInfo], current_title: int) -> None:
+        if (chapters, titles, current_title) == (self.chapters, self.titles, self.current_title):
+            return
+        self.chapters, self.titles, self.current_title = chapters, titles, current_title
+        self.chapters_changed.emit(self.chapters, self.titles, self.current_title)
+
+    def refresh_chapters(self) -> None:
+        """Re-read chapters and titles from the engine (cheap; called while playing)."""
+        self._chapter_poll = self._clock()
+        if not self.has_media:
+            self._set_chapters([], [], -1)
+            return
+        self._set_chapters(self.backend.chapters(), self.backend.titles(), self.backend.title())
+
+    def current_chapter(self) -> int:
+        """Index of the chapter at the playback position (-1 without chapters)."""
+        if not self.chapters:
+            return -1
+        t = self.backend.time()
+        index = 0
+        for i, ch in enumerate(self.chapters):
+            if ch.start_ms <= t:
+                index = i
+        return index
+
+    def _chapter_osd(self, index: int) -> None:
+        if 0 <= index < len(self.chapters):
+            ch = self.chapters[index]
+            self.osd.emit(f"Chapter {index + 1}/{len(self.chapters)}: {ch.title}")
+
+    def set_chapter(self, index: int) -> None:
+        if not self.has_media or not 0 <= index < len(self.chapters):
+            return
+        self.backend.set_chapter(index)
+        self.position_changed.emit(self.chapters[index].start_ms, self.backend.length())
+        self._chapter_osd(index)
+
+    def next_chapter(self) -> None:
+        if not self.has_media:
+            return
+        index = self.current_chapter()
+        if self.chapters and index + 1 < len(self.chapters):
+            self.set_chapter(index + 1)
+        elif self.titles and 0 <= self.current_title < len(self.titles) - 1:
+            self.set_title(self.current_title + 1)  # like VLC: past the last chapter → next title
+        elif self.chapters:
+            self.osd.emit("Last chapter")
+
+    def previous_chapter(self) -> None:
+        if not self.has_media or not self.chapters:
+            if self.has_media and self.titles and self.current_title > 0:
+                self.set_title(self.current_title - 1)
+            return
+        index = self.current_chapter()
+        into = self.backend.time() - self.chapters[index].start_ms
+        if index > 0 and into < self.CHAPTER_RESTART_MS:
+            self.set_chapter(index - 1)
+        else:
+            self.set_chapter(index)
+
+    def set_title(self, index: int) -> None:
+        if not self.has_media or not 0 <= index < len(self.titles):
+            return
+        self.backend.set_title(index)
+        title = self.titles[index]
+        self.osd.emit("Disc menu" if title.is_menu else f"Title {index + 1}: {title.name}")
+        self.refresh_chapters()
+
+    def next_title(self) -> None:
+        if self.titles and self.current_title + 1 < len(self.titles):
+            self.set_title(self.current_title + 1)
+
+    def previous_title(self) -> None:
+        if self.titles and self.current_title > 0:
+            self.set_title(self.current_title - 1)
+
+    @property
+    def in_menu(self) -> bool:
+        """The current disc title is an interactive menu (arrows/Enter navigate it)."""
+        return 0 <= self.current_title < len(self.titles) and self.titles[self.current_title].is_menu
+
+    def disc_menu(self) -> None:
+        """Go to the disc's menu (its menu title, or the engine's popup menu)."""
+        if not self.has_media:
+            return
+        menu = next((t.index for t in self.titles if t.is_menu), None)
+        if menu is not None:
+            self.set_title(menu)
+        else:
+            self.backend.navigate("popup")
+            self.osd.emit("Disc menu")
+        self.refresh_chapters()
+
+    def navigate(self, action: str) -> None:
+        if self.has_media and action in NAVIGATE_ACTIONS:
+            self.backend.navigate(action)
+            if action == "activate":
+                self.refresh_chapters()
 
     # =================================================================== loop
     def tick(self) -> None:
@@ -802,8 +953,12 @@ class PlayerController:
         if st is PlaybackState.PLAYING and not self._started:
             self._on_started()
         if st is PlaybackState.ENDED:
+            if self._expand_subitems():
+                return
             self._set_state(st)
             self._on_ended()
+            return
+        if not self._started and self._opening_timed_out(st):
             return
         if st is PlaybackState.ERROR:
             self._set_state(st)
@@ -818,6 +973,8 @@ class PlayerController:
                 t = target
             self.position_changed.emit(t, self.backend.length())
             self._poll_tracks()
+            if self._clock() - self._chapter_poll >= self.CHAPTER_POLL_S:
+                self.refresh_chapters()
             if st is PlaybackState.PLAYING:
                 self._remember_position(save=False)
                 if _time.monotonic() - self._last_resume_save > self.RESUME_SAVE_INTERVAL_S:
@@ -851,6 +1008,8 @@ class PlayerController:
         if self._pause_after_start:
             self._pause_after_start = False
             self.backend.pause()
+        self._opening_since = None
+        self.refresh_chapters()
         index = self.playlist.current_index
         length = self.backend.length()
         if index >= 0 and length > 0 and self.playlist[index].duration_ms != length:
@@ -882,9 +1041,51 @@ class PlayerController:
             self._set_state(PlaybackState.STOPPED)
             self.position_changed.emit(0, -1)
 
+    def _expand_subitems(self) -> bool:
+        """A YouTube page or remote playlist resolved to sub-items: play those instead.
+
+        Mirrors VLC's playlist, where such an entry expands into its children.
+        """
+        subitems = self.backend.subitems()
+        index = self.playlist.current_index
+        item = self.playlist.current
+        if not subitems or item is None:
+            return False
+        new = [PlaylistItem(mrl, title.strip(), options=list(item.options)) for mrl, title in subitems]
+        if len(new) == 1 and (not subitems[0][1].strip() or "://" in subitems[0][1]):
+            new[0].title = item.title  # keep the name the user gave the link
+        self.playlist.replace(index, new)
+        self._start_current()
+        return True
+
+    def _opening_timed_out(self, st: PlaybackState) -> bool:
+        """Network media that never starts must fail with a message, not hang."""
+        item = self.playlist.current
+        timeout = self.settings.network_timeout_s
+        if (self._opening_since is None or item is None or timeout <= 0 or not is_network_mrl(item.mrl)
+                or st not in (PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.IDLE)):
+            return False
+        if self._clock() - self._opening_since < timeout:
+            return False
+        self._opening_since = None
+        self.backend.stop()
+        self._report_open_failure(item, f"no response after {timeout} s")
+        self._set_state(PlaybackState.ERROR)
+        self._set_state(PlaybackState.STOPPED)
+        return True
+
+    def _report_open_failure(self, item: PlaylistItem, reason: str = "") -> None:
+        message = describe_open_error(item.mrl, reason)
+        self.error.emit(message)
+        self.open_failed.emit(item, message)
+
     def _on_error(self) -> None:
         item = self.playlist.current
-        self.error.emit(f"Could not play {item.title if item else 'media'}")
+        self._opening_since = None
+        if item is not None and not self._started:
+            self._report_open_failure(item)
+        else:
+            self.error.emit(f"Could not play {item.title if item else 'media'}")
         self._error_streak += 1
         self.backend.stop()
         if self._error_streak < len(self.playlist) and self.playlist.peek_next() not in (-1, self.playlist.current_index):

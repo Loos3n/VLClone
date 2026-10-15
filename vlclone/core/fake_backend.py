@@ -6,7 +6,8 @@ logic deterministic to test.
 
 from __future__ import annotations
 
-from .backend import MediaBackend, MediaInfo, PlaybackState, StreamInfo, Track
+from .backend import (CaptureDevice, Chapter, MediaBackend, MediaInfo, PlaybackState, StreamInfo, TitleInfo,
+                      Track)
 from .effects import EngineFilters
 
 
@@ -42,6 +43,17 @@ class FakeBackend(MediaBackend):
         self.adjust: dict[str, float] | None = None
         self.normalization = (False, 2.0)
         self.normalization_supported = True
+        # Phase 3 test hooks (all keyed by MRL)
+        self.chapter_map: dict[str, list[Chapter]] = {}
+        self.title_map: dict[str, list[TitleInfo]] = {}
+        self.subitem_map: dict[str, list[tuple[str, str]]] = {}  # "playlist" URLs (YouTube…)
+        self.fail_mrls: set[str] = set()   # go to ERROR when played
+        self.hang_mrls: set[str] = set()   # stay OPENING forever
+        self.navigations: list[str] = []
+        self._title = 0
+        self.devices = {"video": [CaptureDevice("Integrated Camera", "Integrated Camera")],
+                        "audio": [CaptureDevice("", "Default microphone"),
+                                  CaptureDevice("Microphone Array", "Microphone Array")]}
 
     # helpers for tests
     def advance(self, ms: int) -> None:
@@ -62,6 +74,7 @@ class FakeBackend(MediaBackend):
         self.options = list(options or [])
         self.filters = self.pending_filters
         self.loads.append(mrl)
+        self._title = 0
         self._state = PlaybackState.IDLE
         self._time = 0
         self.audio_delay = 0
@@ -72,7 +85,14 @@ class FakeBackend(MediaBackend):
             return
         if self._state in (PlaybackState.ENDED, PlaybackState.STOPPED):
             self._time = 0
-        self._state = PlaybackState.PLAYING
+        if self.mrl in self.fail_mrls:
+            self._state = PlaybackState.ERROR
+        elif self.mrl in self.hang_mrls:
+            self._state = PlaybackState.OPENING
+        elif self.mrl in self.subitem_map and self._state is not PlaybackState.PAUSED:
+            self._state = PlaybackState.ENDED  # libVLC ends a playlist page after listing its items
+        else:
+            self._state = PlaybackState.PLAYING
 
     def pause(self) -> None:
         if self._state is PlaybackState.PLAYING:
@@ -195,6 +215,46 @@ class FakeBackend(MediaBackend):
 
     def set_normalization(self, enabled: bool, level: float) -> None:
         self.normalization = (enabled, level)
+
+    # --- titles / chapters / menus
+    def titles(self) -> list[TitleInfo]:
+        return list(self.title_map.get(self.mrl or "", []))
+
+    def title(self) -> int:
+        return self._title if self.titles() else -1
+
+    def set_title(self, index: int) -> None:
+        if 0 <= index < len(self.titles()):
+            self._title = index
+            self._time = 0
+
+    def chapters(self) -> list[Chapter]:
+        if self.titles() and self.titles()[self._title].is_menu:
+            return []
+        return list(self.chapter_map.get(self.mrl or "", []))
+
+    def chapter(self) -> int:
+        chapters = self.chapters()
+        return max((c.index for c in chapters if c.start_ms <= self._time), default=-1)
+
+    def set_chapter(self, index: int) -> None:
+        chapters = self.chapters()
+        if 0 <= index < len(chapters):
+            self._time = chapters[index].start_ms
+
+    def navigate(self, action: str) -> None:
+        self.navigations.append(action)
+        titles = self.titles()
+        if action == "activate" and titles and titles[self._title].is_menu and len(titles) > 1:
+            self.set_title(next(t.index for t in titles if not t.is_menu))
+
+    def subitems(self) -> list[tuple[str, str]]:
+        if self._state is PlaybackState.ENDED:
+            return list(self.subitem_map.get(self.mrl or "", []))
+        return []
+
+    def capture_devices(self):
+        return {k: list(v) for k, v in self.devices.items()}
 
     def media_info(self) -> MediaInfo:
         if not self.mrl:

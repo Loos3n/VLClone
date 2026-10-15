@@ -17,7 +17,12 @@ def default_path() -> Path:
 
 def save_playlist(playlist: Playlist, path: Path | None = None) -> None:
     """Write the playlist and the current item (without autoplay state)."""
-    items = [{"mrl": it.mrl, "title": it.title, "duration": it.duration_ms} for it in playlist][:MAX_ITEMS]
+    items = []
+    for it in list(playlist)[:MAX_ITEMS]:
+        entry = {"mrl": it.mrl, "title": it.title, "duration": it.duration_ms}
+        if it.options:
+            entry["options"] = list(it.options)
+        items.append(entry)
     save_json(path or default_path(), {"version": 1, "current": playlist.current_index, "items": items})
 
 
@@ -36,7 +41,9 @@ def restore_playlist(playlist: Playlist, path: Path | None = None) -> int:
         title = entry.get("title") if isinstance(entry.get("title"), str) else ""
         duration = entry.get("duration")
         duration = int(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool) else -1
-        items.append(PlaylistItem(entry["mrl"], title, duration))
+        options = entry.get("options")
+        options = [o for o in options if isinstance(o, str)] if isinstance(options, list) else []
+        items.append(PlaylistItem(entry["mrl"], title, duration, options=options))
     if not items:
         return 0
     offset = len(playlist)

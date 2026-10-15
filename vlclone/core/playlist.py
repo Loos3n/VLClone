@@ -32,6 +32,8 @@ class PlaylistItem:
     title: str = ""
     duration_ms: int = -1
     uid: int = field(default_factory=lambda: next(_ids))
+    #: libVLC media options (":network-caching=3000", ":dshow-vdev=…") used every time it loads.
+    options: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.title:
@@ -148,6 +150,24 @@ class Playlist:
             self._current = self.index_of(current_uid)
         self.changed.emit()
         return insert_at
+
+    def replace(self, index: int, items: list) -> list[int]:
+        """Replace one entry with several (a playlist URL that expanded); keeps "current" on the first."""
+        if not 0 <= index < len(self._items) or not items:
+            return []
+        was_current = index == self._current
+        old_uid = self._items[index].uid
+        new = [m if isinstance(m, PlaylistItem) else PlaylistItem(m) for m in items]
+        self._items[index:index + 1] = new
+        if self._current > index:
+            self._current += len(new) - 1
+        if self._shuffle:
+            pos = self._order.index(old_uid) if old_uid in self._order else len(self._order)
+            self._order[pos:pos + 1] = [it.uid for it in new]
+        self.changed.emit()
+        if was_current:
+            self.current_changed.emit(self._current)
+        return list(range(index, index + len(new)))
 
     def set_title(self, index: int, title: str) -> None:
         if 0 <= index < len(self._items) and title:

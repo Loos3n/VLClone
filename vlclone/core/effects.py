@@ -97,6 +97,15 @@ ADJUST_NAMES = list(ADJUST_RANGES)
 
 SHARPEN_MIN, SHARPEN_MAX, SHARPEN_DEFAULT = 0.0, 2.0, 0.5  # libVLC "sharpen-sigma"
 
+# ------------------------------------------------------------------ geometry
+ASPECT_RATIOS: list[str | None] = [None, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"]
+CROP_RATIOS: list[str | None] = [None, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"]
+ZOOM_LEVELS: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0]
+ROTATIONS: list[int] = [0, 90, 180, 270]
+DEINTERLACE_MODES: list[str | None] = [
+    None, "blend", "bob", "discard", "linear", "mean", "x", "yadif", "yadif2x", "phosphor", "ivtc",
+]
+
 
 def _num(value, lo: float, hi: float, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
@@ -136,12 +145,49 @@ class VideoEffects:
 
 
 @dataclass
+class Geometry:
+    """Picture geometry: aspect ratio, crop, zoom, rotation, deinterlace.
+
+    Stored with the effects so it follows the same global / per-file scope.
+    """
+
+    aspect_ratio: str | None = None
+    crop: str | None = None
+    zoom: float = 0.0
+    rotation: int = 0
+    deinterlace: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw) -> "Geometry":
+        g = cls()
+        if not isinstance(raw, dict):
+            return g
+        if raw.get("aspect_ratio") in ASPECT_RATIOS:
+            g.aspect_ratio = raw["aspect_ratio"]
+        if raw.get("crop") in CROP_RATIOS:
+            g.crop = raw["crop"]
+        zoom = raw.get("zoom")
+        if isinstance(zoom, (int, float)) and not isinstance(zoom, bool) and float(zoom) in ZOOM_LEVELS:
+            g.zoom = float(zoom)
+        if raw.get("rotation") in ROTATIONS and not isinstance(raw.get("rotation"), bool):
+            g.rotation = int(raw["rotation"])
+        if raw.get("deinterlace") in DEINTERLACE_MODES:
+            g.deinterlace = raw["deinterlace"]
+        return g
+
+    @property
+    def is_default(self) -> bool:
+        return self == Geometry()
+
+
+@dataclass
 class Effects:
     audio: AudioEffects = field(default_factory=AudioEffects)
     video: VideoEffects = field(default_factory=VideoEffects)
+    geometry: Geometry = field(default_factory=Geometry)
 
     def to_dict(self) -> dict:
-        return {"audio": asdict(self.audio), "video": asdict(self.video)}
+        return {"audio": asdict(self.audio), "video": asdict(self.video), "geometry": asdict(self.geometry)}
 
     @classmethod
     def from_dict(cls, raw) -> "Effects":
@@ -168,6 +214,7 @@ class Effects:
         vi.flip_v = v.get("flip_v") is True
         vi.sharpen = v.get("sharpen") is True
         vi.sharpen_strength = _num(v.get("sharpen_strength"), SHARPEN_MIN, SHARPEN_MAX, SHARPEN_DEFAULT)
+        fx.geometry = Geometry.from_dict(raw.get("geometry"))
         return fx
 
     def copy(self) -> "Effects":
