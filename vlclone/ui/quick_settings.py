@@ -225,7 +225,7 @@ class QuickSettings(QWidget):
         self.tab_group = QButtonGroup(self)
         self.pages: dict[str, Page] = {}
         self._anchor = QRect()
-        self.setFixedWidth(430)
+        self.setFixedWidth(480)  # five tabs: Playback … Chapters
 
         self._anim = QPropertyAnimation(self, b"windowOpacity", self, duration=160)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -569,8 +569,6 @@ class ChaptersPage(Page):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(self.chapters)
-        scroll.setMaximumHeight(260)
-        scroll.setMinimumHeight(40)
         self.chapter_scroll = scroll
         self.lay.addWidget(scroll)
 
@@ -616,6 +614,9 @@ class ChaptersPage(Page):
         Track = self._Track
         self.chapters.set_tracks([Track(c.index, f"{c.index + 1}.  {c.title}   ·  {format_ms(c.start_ms)}")
                                   for c in ctl.chapters], ctl.current_chapter())
+        # Show the whole list up to ~7 rows, then scroll.
+        self.chapters.layout().activate()
+        self.chapter_scroll.setFixedHeight(min(260, max(40, self.chapters.sizeHint().height() + 2)))
         has_chapters = bool(ctl.chapters)
         self.prev.setEnabled(has_chapters)
         self.next.setEnabled(has_chapters or ctl.current_title + 1 < len(ctl.titles))

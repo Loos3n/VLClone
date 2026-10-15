@@ -248,7 +248,8 @@ class RowDelegate(QStyledItemDelegate):
         p.drawText(top, Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(item.title, Qt.ElideRight, top.width()))
         p.setFont(theme.app_font(8.5))
         p.setPen(QColor(theme.TEXT_MUTED))
-        sub_text = " — ".join(x for x in (item.artist, item.album) if x) or (item.path or item.mrl)
+        sub_text = (" — ".join(x for x in (item.artist, item.album) if x)
+                    or (os.path.dirname(item.path) if item.path else item.mrl))
         sub = QRect(x, top.bottom() + 3, top.width(), 16)
         p.drawText(sub, Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetrics(p.font()).elidedText(sub_text, Qt.ElideMiddle, sub.width()))
@@ -355,7 +356,16 @@ class LibraryView(QWidget):
         super().__init__(parent)
         self.setObjectName("Library")
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet(f"#Library {{ background: {theme.BG}; }}")
+        self.setStyleSheet(f"""
+            #Library {{ background: {theme.BG}; }}
+            QTreeWidget {{ background: transparent; border: none; outline: none; }}
+            QTreeWidget::item {{ padding: 6px 2px; border-radius: 6px; }}
+            QTreeWidget::item:hover {{ background: {theme.SURFACE_2}; }}
+            QTreeWidget::item:selected {{ background: {theme.SURFACE_3}; color: {theme.TEXT}; }}
+            QHeaderView {{ background: transparent; border: none; }}
+            QHeaderView::section {{ background: transparent; color: {theme.TEXT_MUTED}; border: none;
+                border-bottom: 1px solid {theme.BORDER}; padding: 6px 8px; font-weight: 600; }}
+        """)
         self.service = service
         self.settings = settings
         self.resume_entries = resume_entries
@@ -460,6 +470,7 @@ class LibraryView(QWidget):
         self.music.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.music.setContextMenuPolicy(Qt.CustomContextMenu)
         self.music.setUniformRowHeights(True)
+        self.music.setIndentation(18)
         self.music.itemDoubleClicked.connect(lambda it, _col: self._activate(self._tree_items(it)))
         self.music.customContextMenuRequested.connect(self._music_menu)
 
