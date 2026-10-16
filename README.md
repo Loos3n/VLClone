@@ -39,6 +39,9 @@ installer all read it), commit, then push a matching tag:
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
+Or, without pushing a tag: Actions → *Windows build* → *Run workflow* on `main`
+→ tick *release*; that run creates the `v<version>` tag itself.
+
 The *Windows build* workflow checks that the tag matches `__version__`, builds,
 self-tests, and publishes a GitHub Release with both files and release notes
 generated from the commits since the previous `v*` tag
