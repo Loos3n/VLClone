@@ -16,7 +16,8 @@ REPO_URL = "https://github.com/Loos3n/VLClone"
 
 
 def git(*args: str) -> str:
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+    # git writes UTF-8; without encoding= Windows would decode it with its ANSI code page (mojibake).
+    return subprocess.run(["git", *args], check=True, capture_output=True, encoding="utf-8").stdout.strip()
 
 
 def previous_tag(tag: str) -> str | None:
