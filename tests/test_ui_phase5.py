@@ -380,3 +380,19 @@ def test_keep_awake_and_os_session(app, make_window, tmp_path, monkeypatch):
     w.desktop.shortcut_used("next")
     w.desktop._from_os("next")  # the same key press through the media overlay: dropped
     assert commands == []
+
+
+def test_welcome_screen_closes_when_a_folder_is_chosen_twice(app, make_window, tmp_path, monkeypatch):
+    from vlclone.ui.welcome import WelcomeDialog
+
+    home = tmp_path / "home"
+    (home / "Videos").mkdir(parents=True)
+    (home / "Other").mkdir()
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    w = make_window()
+    dlg = WelcomeDialog(w.settings, w.library, w)
+    # The suggested Videos box stays ticked and the same folder is picked again as Music.
+    dlg.folders = [(str(home / "Videos"), "music"), (str(home / "Other"), "music")]
+    dlg.accept()
+    assert dlg.result() == WelcomeDialog.Accepted
+    assert sorted(w.library.folders()) == [(str(home / "Other"), "music"), (str(home / "Videos"), "video")]

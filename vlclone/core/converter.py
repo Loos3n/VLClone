@@ -109,6 +109,9 @@ class ConvertJob:
     started_at: float | None = None
     handle: object = None
     stopping: bool = False  # live job asked to finish
+    length_known: bool = True  # False: the source reports no length (streams), progress is indeterminate
+    media_time_ms: int = -1  # last position the engine reported
+    part_size: int = 0  # last size of the part file
 
     @property
     def part(self) -> str:
@@ -238,6 +241,7 @@ class ConvertQueue:
         job.state = JobState.RUNNING
         job.started_at = self.clock()
         job.progress, job.error = 0.0, ""
+        job.length_known, job.media_time_ms, job.part_size = True, -1, 0
         self._last_progress[job.id] = (0.0, job.started_at)
         self._bump(job)
 
@@ -316,17 +320,33 @@ class ConvertQueue:
         if job.live:
             self._bump(job)  # elapsed time changes
             return
+        # Any sign of work counts as progress for the stall check: the position moving on,
+        # or the output file growing. Sources without a length (network streams) only have these.
+        advanced = False
+        if st.time_ms > job.media_time_ms:
+            advanced = job.media_time_ms >= 0 or st.time_ms > 0
+            job.media_time_ms = st.time_ms
+        try:
+            size = os.path.getsize(job.part)
+        except OSError:
+            size = 0
+        if size > job.part_size:
+            advanced = True
+            job.part_size = size
         s = job.settings
         length = st.length_ms if st.length_ms > 0 else job.duration_ms
         end = s.end_ms if s.end_ms > 0 else length
         span = end - s.start_ms if end and end > 0 else 0
+        job.length_known = span > 0
         if span > 0 and st.time_ms >= 0:
             progress = min(0.999, max(0.0, (st.time_ms - s.start_ms) / span))
-            if progress > job.progress + 1e-4:
-                self._last_progress[job.id] = (progress, now)
             job.progress = max(job.progress, progress)
             elapsed = job.elapsed_s
             job.eta_s = elapsed * (1 - job.progress) / job.progress if job.progress > 0.02 else None
+        else:
+            job.eta_s = None
+        if advanced:
+            self._last_progress[job.id] = (job.progress, now)
         last = self._last_progress.get(job.id, (0.0, now))
         if now - last[1] > self.STALL_S:
             self._fail(job, f"No progress for {int(self.STALL_S)} s; the conversion was stopped.")

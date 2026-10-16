@@ -340,3 +340,13 @@ def test_png_writer(tmp_path):
     assert png_size(tmp_path / "missing.png") is None
     with pytest.raises(ValueError):
         encode_png(2, 2, b"short")
+
+
+def test_same_folder_as_videos_and_music_is_refused_not_crashing(db, tmp_path):
+    folder = tmp_path / "Mixed"
+    folder.mkdir()
+    assert db.add_folder(str(folder), "video") is None
+    error = db.add_folder(str(folder), "music")
+    assert error and "Videos" in error
+    assert db.add_folder(str(folder), "video") == "Already in the library"
+    assert db.folders() == [(str(folder), "video")]

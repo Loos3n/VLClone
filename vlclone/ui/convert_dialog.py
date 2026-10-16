@@ -370,6 +370,9 @@ def job_status(job: ConvertJob) -> str:
     if job.state is JobState.RUNNING:
         if job.live:
             return f"● Recording  {format_ms(int(job.elapsed_s * 1000))}"
+        if not job.length_known:
+            mb = job.part_size / 1_000_000
+            return f"Converting…  {format_ms(max(0, job.media_time_ms))}" + (f"  ·  {mb:.1f} MB" if mb >= 0.1 else "")
         text = f"{int(job.progress * 100)} %"
         if job.eta_s is not None:
             text += f"  ·  {format_ms(int(job.eta_s * 1000))} left"
@@ -441,7 +444,7 @@ class JobRow(QFrame):
         self.detail.setText(f"{job.preset.label}  →  {Path(job.output).name}")
         self.detail.setToolTip(job.output)
         self.bar.setVisible(not job.finished)
-        self.bar.setRange(0, 0 if job.live and job.state is JobState.RUNNING else 1000)
+        self.bar.setRange(0, 0 if (job.live or not job.length_known) and job.state is JobState.RUNNING else 1000)
         self.bar.setValue(int(job.progress * 1000))
         self.status.setText(job_status(job))
         theme.set_error(self.status, job.state is JobState.FAILED or (job.live and job.state is JobState.RUNNING))

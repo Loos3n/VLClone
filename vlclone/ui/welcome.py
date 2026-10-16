@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import sys
 from pathlib import Path
 
@@ -46,6 +48,8 @@ def _theme_preview(mode: str) -> QIcon:
     p.end()
     return QIcon(pm)
 
+
+log = logging.getLogger("vlclone.welcome")
 
 class ThemePicker(QWidget):
     """Dark / Light / Follow system cards and accent swatches; applies live for a preview."""
@@ -285,7 +289,10 @@ class WelcomeDialog(BaseDialog):
         chosen = [(p, k) for b, p, k in self.folder_boxes if b.isChecked()] + self.folders
         if self.library is not None:
             for path, kind in chosen:
-                self.library.add_folder(path, kind)
+                try:
+                    self.library.add_folder(path, kind)  # returns an error message for duplicates
+                except Exception:  # never keep the welcome screen from closing
+                    log.exception("could not add library folder %s", path)
         super().accept()
 
     def reject(self) -> None:

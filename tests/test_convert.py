@@ -485,3 +485,43 @@ def test_settings_round_trip(tmp_path):
     bad = Settings(convert_preset="laserdisc", stream_port=80, stream_mode="rtsp")
     bad.clamp()
     assert (bad.convert_preset, bad.stream_port, bad.stream_mode) == ("mp4_h264", 1024, "copy")
+
+
+class _StreamEngine(FakeTranscoder):
+    """A source that never reports a length (a network stream) but keeps converting."""
+
+    def poll(self, handle):
+        from vlclone.core.converter import EngineStatus
+
+        handle["t"] = handle.get("t", 0) + 1000
+        return EngineStatus("running", time_ms=handle["t"], length_ms=-1)
+
+
+def test_unknown_length_job_is_not_treated_as_stalled(clock, tmp_path):
+    from vlclone.ui.convert_dialog import job_status
+
+    engine = _StreamEngine()
+    queue = ConvertQueue(lambda: engine, clock)
+    job = queue.add("http://example.com/live.ts", "Stream", ConvertSettings("mp4_h264"), str(tmp_path / "s.mp4"))
+    for _ in range(int(queue.STALL_S) * 3):
+        clock.t += 1
+        queue.tick()
+    assert job.state is JobState.RUNNING
+    assert not job.length_known and job.eta_s is None
+    assert job_status(job).startswith("Converting…")
+
+
+def test_unknown_length_job_still_fails_when_really_stuck(clock, tmp_path):
+    class Frozen(_StreamEngine):
+        def poll(self, handle):
+            from vlclone.core.converter import EngineStatus
+
+            return EngineStatus("running", time_ms=5000, length_ms=-1)
+
+    engine = Frozen()
+    queue = ConvertQueue(lambda: engine, clock)
+    job = queue.add("http://example.com/live.ts", "Stream", ConvertSettings("mp4_h264"), str(tmp_path / "s.mp4"))
+    queue.tick()
+    clock.t += queue.STALL_S + 1
+    queue.tick()
+    assert job.state is JobState.FAILED and "No progress" in job.error

@@ -234,6 +234,10 @@ class LibraryDB:
         if not os.path.isdir(path):
             return "That folder does not exist"
         for existing, existing_kind in self.folders():
+            if _norm(existing) == _norm(path):
+                if existing_kind == kind:
+                    return "Already in the library"
+                return f"That folder is already in the library as {FOLDER_KINDS[existing_kind]}"
             if existing_kind == kind and _inside(path, existing):
                 return f"Already in the library (inside {existing})"
         with self._write_lock, self.conn as conn:
