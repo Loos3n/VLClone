@@ -1,6 +1,6 @@
 """Release notes for a tag: the commits since the previous v* tag, as Markdown.
 
-    python packaging/release_notes.py v1.1.0 > notes.md
+    python packaging/release_notes.py v1.1.0 --out notes.md
 
 Only v* tags count as releases (the manual ``build-N`` pre-releases are ignored).
 Merge commits are skipped; each commit's subject becomes a bullet.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 REPO_URL = "https://github.com/Loos3n/VLClone"
 
@@ -56,7 +57,15 @@ def main(argv: list[str]) -> int:
         return 2
     tag = argv[0]
     since = previous_tag(tag)
-    sys.stdout.write(render(tag, since, commits(tag, since)))
+    notes = render(tag, since, commits(tag, since))
+    if "--out" in argv:
+        # Written as UTF-8 here: Windows' console code page cannot encode the notes, and
+        # PowerShell's ">" would save them as UTF-16.
+        out = Path(argv[argv.index("--out") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(notes, encoding="utf-8")
+    else:
+        sys.stdout.buffer.write(notes.encode("utf-8"))
     return 0
 
 

@@ -181,7 +181,7 @@ jobs:
 
       - name: Release notes (commits since the previous v* tag)
         if: steps.meta.outputs.release == 'true'
-        run: python packaging/release_notes.py "${{ steps.meta.outputs.tag }}" > dist/release-notes.md
+        run: python packaging/release_notes.py "${{ steps.meta.outputs.tag }}" --out dist/release-notes.md
 
       - name: GitHub release (v* tag, or Run workflow -> release)
         if: steps.meta.outputs.release == 'true'
