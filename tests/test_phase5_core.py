@@ -520,6 +520,10 @@ def test_release_notes_from_commits_since_last_tag(tmp_path, monkeypatch):
     assert notes.startswith("## VLClone 1.0.0") and "- Change 3 (" in notes and "Change 1" not in notes
     assert "VLClone-1.0.0-Setup.exe" in notes and "compare/v0.9.0...v1.0.0" in notes
     assert release_notes.previous_tag("v0.9.0") is None
+    # The CLI writes UTF-8 itself (the notes contain "→", which Windows' cp1252 console cannot encode).
+    out = tmp_path / "notes" / "release-notes.md"
+    assert release_notes.main(["v1.0.0", "--out", str(out)]) == 0
+    assert out.read_bytes().decode("utf-8").startswith("## VLClone 1.0.0") and "→" in out.read_text("utf-8")
 
 
 def test_version_is_single_sourced():
