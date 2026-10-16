@@ -14,6 +14,10 @@ on:
         description: "Also publish the files as a GitHub pre-release (needs no artifact storage)"
         type: boolean
         default: false
+      release:
+        description: "Publish v<version> (the version in vlclone/__init__.py) as a release, creating the tag"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -84,6 +88,21 @@ jobs:
               Write-Output "::error::Tag v$tag does not match __version__ = $version in vlclone/__init__.py"
               exit 1
             }
+            "release=true" >> $env:GITHUB_OUTPUT
+            "tag=v$version" >> $env:GITHUB_OUTPUT
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release }}" -eq "true") {
+            # Manual release (Run workflow -> release): the tag is created by the release step below.
+            if ("${{ github.ref }}" -ne "refs/heads/main") {
+              Write-Output "::error::Releases are made from main, not ${{ github.ref_name }}"
+              exit 1
+            }
+            if (git tag --list "v$version") {
+              Write-Output "::error::v$version already exists; bump __version__ in vlclone/__init__.py first"
+              exit 1
+            }
+            git tag "v$version"  # local only, so the release notes can name it
+            "release=true" >> $env:GITHUB_OUTPUT
+            "tag=v$version" >> $env:GITHUB_OUTPUT
           }
 
       - name: Unit tests
@@ -147,7 +166,7 @@ jobs:
       # Branch builds keep their files for 3 days only (Actions storage quota); tag builds
       # publish them as a release instead and upload no artifact at all.
       - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: steps.meta.outputs.release != 'true'
         # A full artifact quota should not hide a good build; the step shows
         # as a warning and the manual pre-release below is the alternative.
         continue-on-error: true
@@ -161,13 +180,15 @@ jobs:
           compression-level: 0  # installer and zip are already compressed
 
       - name: Release notes (commits since the previous v* tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: python packaging/release_notes.py "${{ github.ref_name }}" > dist/release-notes.md
+        if: steps.meta.outputs.release == 'true'
+        run: python packaging/release_notes.py "${{ steps.meta.outputs.tag }}" > dist/release-notes.md
 
-      - name: GitHub release (v* tags)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: GitHub release (v* tag, or Run workflow -> release)
+        if: steps.meta.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: VLClone ${{ steps.meta.outputs.version }}
           body_path: dist/release-notes.md
           fail_on_unmatched_files: true
